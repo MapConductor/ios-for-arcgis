@@ -71,16 +71,18 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     func moveCamera(position: MapCameraPosition) {
         typedHolder.mapView.lastCameraPosition = position
         Task {
-            typedHolder.mapView.proxy?.proxy.setViewpointCamera(position.toArcGISCamera())
+            let viewportSize = typedHolder.mapView.viewportSize
+            typedHolder.mapView.proxy?.proxy.setViewpointCamera(position.toArcGISCamera(viewportSize: viewportSize))
         }
     }
 
     func animateCamera(position: MapCameraPosition, duration: Long) {
         typedHolder.mapView.lastCameraPosition = position
         Task {
+            let viewportSize = typedHolder.mapView.viewportSize
             cameraMoveStartListener?(position)
             await typedHolder.mapView.proxy?.proxy.setViewpointCamera(
-                position.toArcGISCamera(),
+                position.toArcGISCamera(viewportSize: viewportSize),
                 duration: Double(duration) / 1000
             )
             cameraMoveEndListener?(position)

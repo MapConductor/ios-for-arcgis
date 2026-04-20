@@ -132,6 +132,7 @@ private struct ArcGISMapViewBody: View {
                     .task {
                         await model.observeSceneLoadStatus()
                     }
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
             }
 
             ForEach(0..<content.views.count, id: \.self) { index in
@@ -232,6 +233,14 @@ private final class ArcGISMapViewModel: ObservableObject {
 
     func attach(proxy: SceneViewProxy) {
         container.proxy = SceneViewProxyBox(proxy)
+    }
+
+    func updateViewportSize(_ size: CGSize) {
+        container.viewportSize = size
+        guard didBind, container.proxy != nil else { return }
+        container.proxy?.proxy.setViewpointCamera(
+            container.lastCameraPosition.toArcGISCamera(viewportSize: size)
+        )
     }
 
     func observeSceneLoadStatus() async {

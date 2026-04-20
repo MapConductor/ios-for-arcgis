@@ -3,7 +3,9 @@ import MapConductorCore
 
 public final class ArcGISZoomAltitudeConverter: ZoomAltitudeConverterProtocol {
     public static let arcGISOptimizedZoom0Altitude = 124_000_000.0
-    private static let referenceHeightPoints = 577.0
+    // Reference map view height in points, calibrated to match iPhone 16 Pro.
+    // Altitude scales linearly with viewport height: altitude = zoom0Altitude * H / referenceHeightPoints.
+    private static let referenceHeightPoints = 720.0
 
     public let zoom0Altitude: Double
     private let zoomFactor = 2.0
@@ -65,8 +67,7 @@ public final class ArcGISZoomAltitudeConverter: ZoomAltitudeConverterProtocol {
 
     private func resolveZoom0Altitude(viewportHeightPx: Int?) -> Double {
         guard let height = viewportHeightPx, height > 0 else { return zoom0Altitude }
-        let heightScale = pow(Double(height) / Self.referenceHeightPoints, 0.42)
-        return zoom0Altitude * heightScale
+        return zoom0Altitude * Double(height) / Self.referenceHeightPoints
     }
 
     private func cosLatitudeFactor(_ latitude: Double) -> Double {

@@ -7,6 +7,7 @@ final class ArcGISSceneContainer {
     let graphicsOverlays: [GraphicsOverlay]
     var proxy: SceneViewProxyBox?
     var lastCameraPosition: MapCameraPosition
+    var viewportSize: CGSize?
     // ArcGIS SDK uses weak_ptr internally, so these must be retained here to keep C++ objects alive.
     let baseSurface: ArcGIS.Surface
     let elevationSources: [ArcGIS.ElevationSource]

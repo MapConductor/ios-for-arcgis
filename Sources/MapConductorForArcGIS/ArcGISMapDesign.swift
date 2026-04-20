@@ -135,23 +135,23 @@ public struct ArcGISDesign: ArcGISMapDesignTypeProtocol, Hashable {
         case HumanGeographyDarkDetail.id: return .arcGISHumanGeographyDarkDetail
         case HumanGeographyDarkLabels.id: return .arcGISHumanGeographyDarkLabels
         case Outdoor.id: return .arcGISOutdoor
-        case OsmStandard.id: return .osmStandard
-        case OsmStandardRelief.id: return .osmStandardRelief
-        case OsmStandardReliefBase.id: return .osmStandardReliefBase
-        case OsmStreets.id: return .osmStreets
-        case OsmStreetsRelief.id: return .osmStreetsRelief
-        case OsmLightGray.id: return .osmLightGray
-        case OsmLightGrayBase.id: return .osmLightGrayBase
-        case OsmLightGrayLabels.id: return .osmLightGrayLabels
-        case OsmDarkGray.id: return .osmDarkGray
-        case OsmDarkGrayBase.id: return .osmDarkGrayBase
-        case OsmDarkGrayLabels.id: return .osmDarkGrayLabels
-        case OsmStreetsReliefBase.id: return .osmStreetsReliefBase
-        case OsmBlueprint.id: return .osmBlueprint
-        case OsmHybrid.id: return .osmHybrid
-        case OsmHybridDetail.id: return .osmHybridDetail
-        case OsmNavigation.id: return .osmNavigation
-        case OsmNavigationDark.id: return .osmNavigationDark
+        case OsmStandard.id: return Basemap.Style.openOSMStyle
+        case OsmStandardRelief.id: return Basemap.Style.openOSMStyleRelief
+        case OsmStandardReliefBase.id: return Basemap.Style.openOSMStyleReliefBase
+        case OsmStreets.id: return Basemap.Style.openStreets
+        case OsmStreetsRelief.id: return Basemap.Style.openStreetsRelief
+        case OsmLightGray.id: return Basemap.Style.openLightGray
+        case OsmLightGrayBase.id: return Basemap.Style.openLightGrayBase
+        case OsmLightGrayLabels.id: return Basemap.Style.openLightGrayLabels
+        case OsmDarkGray.id: return Basemap.Style.openDarkGray
+        case OsmDarkGrayBase.id: return Basemap.Style.openDarkGrayBase
+        case OsmDarkGrayLabels.id: return Basemap.Style.openDarkGrayLabels
+        case OsmStreetsReliefBase.id: return Basemap.Style.openStreetsReliefBase
+        case OsmBlueprint.id: return Basemap.Style.openBlueprint
+        case OsmHybrid.id: return Basemap.Style.openHybrid
+        case OsmHybridDetail.id: return Basemap.Style.openHybridDetail
+        case OsmNavigation.id: return Basemap.Style.openNavigation
+        case OsmNavigationDark.id: return Basemap.Style.openNavigationDark
         default: return .arcGISStreets
         }
     }
