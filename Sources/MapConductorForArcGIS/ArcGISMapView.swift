@@ -97,6 +97,12 @@ private struct ArcGISMapViewBody: View {
                     .onDrawStatusChanged { status in
                         NSLog("[MapConductor][ArcGIS] drawStatus=%@", String(describing: status))
                     }
+                    .onViewpointChanged(kind: .centerAndScale) { _ in
+                        model.updateInfoBubbleLayouts()
+                    }
+                    .onNavigatingChanged { _ in
+                        model.updateInfoBubbleLayouts()
+                    }
                     .onAppear {
                         NSLog("[MapConductor][ArcGIS] SceneView onAppear begin")
                         model.attach(proxy: proxy)
@@ -118,14 +124,15 @@ private struct ArcGISMapViewBody: View {
                     }
                     .task(id: content.identityFingerprint) {
                         NSLog(
-                            "[MapConductor][ArcGIS] content task fingerprint=%d markers=%d polylines=%d polygons=%d circles=%d groundImages=%d rasterLayers=%d",
+                            "[MapConductor][ArcGIS] content task fingerprint=%d markers=%d polylines=%d polygons=%d circles=%d groundImages=%d rasterLayers=%d infoBubbles=%d",
                             content.identityFingerprint,
                             content.markers.count,
                             content.polylines.count,
                             content.polygons.count,
                             content.circles.count,
                             content.groundImages.count,
-                            content.rasterLayers.count
+                            content.rasterLayers.count,
+                            content.infoBubbles.count
                         )
                         await model.updateContent(content)
                     }
@@ -134,6 +141,8 @@ private struct ArcGISMapViewBody: View {
                     }
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
             }
+
+            InfoBubbleContainerRepresentable(container: model.infoBubbleContainer)
 
             ForEach(0..<content.views.count, id: \.self) { index in
                 content.views[index]
@@ -151,8 +160,16 @@ private extension MapViewContent {
         circles.forEach { hasher.combine($0.id) }
         groundImages.forEach { hasher.combine($0.id) }
         rasterLayers.forEach { hasher.combine($0.id) }
+        infoBubbles.forEach { hasher.combine($0.id) }
         return hasher.finalize()
     }
+}
+
+private struct InfoBubbleContainerRepresentable: UIViewRepresentable {
+    let container: PassthroughContainerView
+
+    func makeUIView(context: Context) -> PassthroughContainerView { container }
+    func updateUIView(_ uiView: PassthroughContainerView, context: Context) {}
 }
 
 @MainActor
@@ -185,6 +202,9 @@ private final class ArcGISMapViewModel: ObservableObject {
 
     private(set) var controller: ArcGISMapViewController?
     private var didBind = false
+
+    let infoBubbleContainer = PassthroughContainerView()
+    private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
 
     init(state: ArcGISMapViewState) {
         NSLog(
@@ -294,6 +314,22 @@ private final class ArcGISMapViewModel: ObservableObject {
         controller.setCameraMoveStartListener(listener: onCameraMoveStart)
         controller.setCameraMoveListener(listener: onCameraMove)
         controller.setCameraMoveEndListener(listener: onCameraMoveEnd)
+
+        let markerController = controller.markerController
+        infoBubbleCoordinator = InfoBubbleOverlayCoordinator(
+            container: infoBubbleContainer,
+            project: { [weak self] point in
+                guard let proxy = self?.container.proxy?.proxy else { return nil }
+                return proxy.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))?.screenPoint
+            },
+            resolveMarkerStateForIcon: { [weak markerController] id, bubbleMarker in
+                markerController?.markerManager.getEntity(id)?.state ?? bubbleMarker
+            },
+            iconMetrics: { markerState in
+                let icon = (markerState.icon ?? DefaultMarkerIcon()).toBitmapIcon()
+                return MarkerIconMetrics(size: icon.size, anchor: icon.anchor, infoAnchor: icon.infoAnchor)
+            }
+        )
         NSLog("[MapConductor][ArcGIS] bind end")
     }
 
@@ -302,8 +338,18 @@ private final class ArcGISMapViewModel: ObservableObject {
         state.setController(nil)
         state.setMapViewHolder(nil)
         controller = nil
+        infoBubbleCoordinator?.unbind()
+        infoBubbleCoordinator = nil
         didBind = false
         NSLog("[MapConductor][ArcGIS] unbind end")
+    }
+
+    func syncInfoBubbles(_ bubbles: [InfoBubble]) {
+        infoBubbleCoordinator?.syncInfoBubbles(bubbles)
+    }
+
+    func updateInfoBubbleLayouts() {
+        infoBubbleCoordinator?.updateAllLayouts()
     }
 
     func updateContent(_ content: MapViewContent) async {
@@ -324,6 +370,8 @@ private final class ArcGISMapViewModel: ObservableObject {
         NSLog("[MapConductor][ArcGIS] polylines synced count=%d", content.polylines.count)
         await controller.polygonController.syncPolygons(content.polygons)
         NSLog("[MapConductor][ArcGIS] polygons synced count=%d", content.polygons.count)
+        syncInfoBubbles(content.infoBubbles)
+        NSLog("[MapConductor][ArcGIS] infoBubbles synced count=%d", content.infoBubbles.count)
         NSLog("[MapConductor][ArcGIS] updateContent end")
     }
 }

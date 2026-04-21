@@ -45,7 +45,9 @@ final class ArcGISMapViewHolder: MapViewHolderProtocol {
     }
 
     func toScreenOffset(position: GeoPointProtocol) -> CGPoint? {
-        nil
+        guard let proxy = mapView.proxy?.proxy else { return nil }
+        let point = position.toArcGISPoint(spatialReference: .wgs84)
+        return proxy.screenPoint(fromLocation: point)?.screenPoint
     }
 
     func fromScreenOffset(offset: CGPoint) async -> GeoPoint? {

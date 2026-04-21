@@ -107,24 +107,32 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         mapClickListener?(point)
     }
 
+    @MainActor
     func handleTap(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
-        let touchPosition = mapPoint?.toGeoPoint()
+        guard let touchPosition = mapPoint?.toGeoPoint() else { return false }
 
-        if let result = try? await typedHolder.mapView.proxy?.proxy.identify(
-            on: markerController.renderer.markerLayer,
-            screenPoint: screenPoint,
-           tolerance: 12,
-           maximumResults: 1
-        ),
-           let graphic = result.graphics.first,
-           let markerId = graphic.attributeValue(forKey: "id") as? String,
-           let entity = markerController.markerManager.getEntity(markerId) {
-            markerController.dispatchClick(state: entity.state)
+//        MapConductor manages all markers by our MakerManager.
+//        We don't use SDK's semantic logic. Therefore, the following code does not work.
+//
+//        if let result = try? await typedHolder.mapView.proxy?.proxy.identify(
+//            on: markerController.renderer.markerLayer,
+//            screenPoint: screenPoint,
+//           tolerance: 12,
+//           maximumResults: 1
+//        ),
+//           let graphic = result.graphics.first,
+//           let markerId = graphic.attributeValue(forKey: "id") as? String,
+//           let entity = markerController.markerManager.getEntity(markerId) {
+//            markerController.dispatchClick(state: entity.state)
+//            return true
+//        }
+
+        
+        if let markerEntity = markerController.find(position: touchPosition) {
+            markerController.dispatchClick(state: markerEntity.state)
             return true
         }
-
-        guard let touchPosition else { return false }
-
+        
         if let circle = circleController.find(position: touchPosition) {
             circleController.dispatchClick(event: CircleEvent(state: circle.state, clicked: touchPosition))
             return true
