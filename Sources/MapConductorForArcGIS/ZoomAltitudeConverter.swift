@@ -2,7 +2,7 @@ import Foundation
 import MapConductorCore
 
 public final class ArcGISZoomAltitudeConverter: ZoomAltitudeConverterProtocol {
-    public static let arcGISOptimizedZoom0Altitude = 124_000_000.0
+    public static let arcGISOptimizedZoom0Altitude = 136_500_000.0
     // Reference map view height in points, calibrated to match iPhone 16 Pro.
     // Altitude scales linearly with viewport height: altitude = zoom0Altitude * H / referenceHeightPoints.
     private static let referenceHeightPoints = 720.0

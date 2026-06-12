@@ -104,6 +104,9 @@ private struct ArcGISMapViewBody: View {
                     .onDrawStatusChanged { status in
                         NSLog("[MapConductor][ArcGIS] drawStatus=%@", String(describing: status))
                     }
+                    .onCameraChanged { camera in
+                        model.notifyCameraMove(camera: camera)
+                    }
                     .onViewpointChanged(kind: .centerAndScale) { _ in
                         model.updateInfoBubbleLayouts()
                     }
@@ -229,6 +232,9 @@ private final class ArcGISMapViewModel: ObservableObject {
     private(set) var controller: ArcGISMapViewController?
     private var didBind = false
     var latestTouchScreenPoint: CGPoint?
+
+    private var cameraMoveEndWorkItem: DispatchWorkItem?
+    private let cameraMoveEndDebounceSeconds = 0.18
 
     let infoBubbleContainer = PassthroughContainerView()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
@@ -372,6 +378,19 @@ private final class ArcGISMapViewModel: ObservableObject {
         infoBubbleCoordinator = nil
         didBind = false
         NSLog("[MapConductor][ArcGIS] unbind end")
+    }
+
+    func notifyCameraMove(camera: Camera) {
+        let position = camera.toMapCameraPosition(viewportSize: container.viewportSize)
+        container.lastCameraPosition = position
+        controller?.notifyCameraMove(position)
+
+        cameraMoveEndWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.controller?.notifyCameraMoveEnd(position)
+        }
+        cameraMoveEndWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + cameraMoveEndDebounceSeconds, execute: workItem)
     }
 
     func syncInfoBubbles(_ bubbles: [InfoBubble]) {

@@ -79,11 +79,13 @@ public extension Camera {
         arcGISCameraConverter.altitudeToZoomLevel(altitude: location.z ?? 0, latitude: location.y, tilt: pitch)
     }
 
-    func toMapCameraPosition(visibleRegion: VisibleRegion? = nil) -> MapCameraPosition {
+    func toMapCameraPosition(visibleRegion: VisibleRegion? = nil, viewportSize: CGSize? = nil) -> MapCameraPosition {
         let altitude = location.z ?? 0
+        let width = viewportSize.map { Int($0.width) }
+        let height = viewportSize.map { Int($0.height) }
         return MapCameraPosition(
             position: GeoPoint(latitude: location.y, longitude: location.x, altitude: altitude),
-            zoom: arcGISCameraConverter.altitudeToZoomLevel(altitude: altitude, latitude: location.y, tilt: pitch),
+            zoom: arcGISCameraConverter.altitudeToZoomLevel(altitude: altitude, latitude: location.y, tilt: pitch, viewportWidthPx: width, viewportHeightPx: height),
             bearing: ((heading.truncatingRemainder(dividingBy: 360)) + 360).truncatingRemainder(dividingBy: 360),
             tilt: pitch,
             visibleRegion: visibleRegion
