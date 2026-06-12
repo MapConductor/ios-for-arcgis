@@ -107,6 +107,10 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         mapClickListener?(point)
     }
 
+    func notifyMapLongClick(_ point: GeoPoint) {
+        mapLongClickListener?(point)
+    }
+
     @MainActor
     func handleTap(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
         guard let touchPosition = mapPoint?.toGeoPoint() else { return false }
@@ -151,5 +155,22 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         }
         notifyMapClick(touchPosition)
         return false
+    }
+
+    @MainActor
+    func handleLongPress(screenPoint: CGPoint, mapPoint: Point?) async {
+        let touchPosition: GeoPoint?
+        if let mapPoint {
+            touchPosition = mapPoint.toGeoPoint()
+        } else if let proxy = typedHolder.mapView.proxy?.proxy,
+                  let resolvedPoint = try? await proxy.location(fromScreenPoint: screenPoint) {
+            touchPosition = resolvedPoint.toGeoPoint()
+        } else {
+            touchPosition = nil
+        }
+
+        guard let touchPosition else { return }
+
+        notifyMapLongClick(touchPosition)
     }
 }

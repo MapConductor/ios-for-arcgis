@@ -8,9 +8,12 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     private var markerStatesById: [String: MarkerState] = [:]
     private var markerSubscriptions: [String: AnyCancellable] = [:]
 
-    init(markerLayer: GraphicsOverlay) {
+    init(markerLayer: GraphicsOverlay, container: ArcGISSceneContainer) {
         let markerManager = MarkerManager<Graphic>.defaultManager()
-        super.init(markerManager: markerManager, renderer: ArcGISMarkerRenderer(markerLayer: markerLayer))
+        super.init(
+            markerManager: markerManager,
+            renderer: ArcGISMarkerRenderer(markerLayer: markerLayer, container: container)
+        )
     }
 
     func syncMarkers(_ markers: [MapConductorCore.Marker]) async {
@@ -54,6 +57,7 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         markerSubscriptions.values.forEach { $0.cancel() }
         markerSubscriptions.removeAll()
         markerStatesById.removeAll()
+        renderer.unbind()
         destroy()
     }
 

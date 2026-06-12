@@ -9,6 +9,7 @@ public struct ArcGISMapView: View {
 
     private let onMapLoaded: OnMapLoadedHandler<ArcGISMapViewState>?
     private let onMapClick: OnMapEventHandler?
+    private let onMapLongClick: OnMapEventHandler?
     private let onCameraMoveStart: OnCameraMoveHandler?
     private let onCameraMove: OnCameraMoveHandler?
     private let onCameraMoveEnd: OnCameraMoveHandler?
@@ -19,6 +20,7 @@ public struct ArcGISMapView: View {
         state: ArcGISMapViewState,
         onMapLoaded: OnMapLoadedHandler<ArcGISMapViewState>? = nil,
         onMapClick: OnMapEventHandler? = nil,
+        onMapLongClick: OnMapEventHandler? = nil,
         onCameraMoveStart: OnCameraMoveHandler? = nil,
         onCameraMove: OnCameraMoveHandler? = nil,
         onCameraMoveEnd: OnCameraMoveHandler? = nil,
@@ -28,6 +30,7 @@ public struct ArcGISMapView: View {
         self.state = state
         self.onMapLoaded = onMapLoaded
         self.onMapClick = onMapClick
+        self.onMapLongClick = onMapLongClick
         self.onCameraMoveStart = onCameraMoveStart
         self.onCameraMove = onCameraMove
         self.onCameraMoveEnd = onCameraMoveEnd
@@ -41,6 +44,7 @@ public struct ArcGISMapView: View {
             state: state,
             onMapLoaded: onMapLoaded,
             onMapClick: onMapClick,
+            onMapLongClick: onMapLongClick,
             onCameraMoveStart: onCameraMoveStart,
             onCameraMove: onCameraMove,
             onCameraMoveEnd: onCameraMoveEnd,
@@ -55,6 +59,7 @@ private struct ArcGISMapViewBody: View {
 
     let onMapLoaded: OnMapLoadedHandler<ArcGISMapViewState>?
     let onMapClick: OnMapEventHandler?
+    let onMapLongClick: OnMapEventHandler?
     let onCameraMoveStart: OnCameraMoveHandler?
     let onCameraMove: OnCameraMoveHandler?
     let onCameraMoveEnd: OnCameraMoveHandler?
@@ -67,6 +72,7 @@ private struct ArcGISMapViewBody: View {
         state: ArcGISMapViewState,
         onMapLoaded: OnMapLoadedHandler<ArcGISMapViewState>?,
         onMapClick: OnMapEventHandler?,
+        onMapLongClick: OnMapEventHandler?,
         onCameraMoveStart: OnCameraMoveHandler?,
         onCameraMove: OnCameraMoveHandler?,
         onCameraMoveEnd: OnCameraMoveHandler?,
@@ -76,6 +82,7 @@ private struct ArcGISMapViewBody: View {
         self.state = state
         self.onMapLoaded = onMapLoaded
         self.onMapClick = onMapClick
+        self.onMapLongClick = onMapLongClick
         self.onCameraMoveStart = onCameraMoveStart
         self.onCameraMove = onCameraMove
         self.onCameraMoveEnd = onCameraMoveEnd
@@ -110,6 +117,7 @@ private struct ArcGISMapViewBody: View {
                         model.bind(
                             state: state,
                             onMapClick: onMapClick,
+                            onMapLongClick: onMapLongClick,
                             onCameraMoveStart: onCameraMoveStart,
                             onCameraMove: onCameraMove,
                             onCameraMoveEnd: onCameraMoveEnd
@@ -140,6 +148,24 @@ private struct ArcGISMapViewBody: View {
                         await model.observeSceneLoadStatus()
                     }
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                model.latestTouchScreenPoint = value.location
+                            }
+                            .onEnded { _ in
+                                model.latestTouchScreenPoint = nil
+                            }
+                    )
+                    .simultaneousGesture(
+                        LongPressGesture()
+                            .onEnded { _ in
+                                guard let screenPoint = model.latestTouchScreenPoint else { return }
+                                Task {
+                                    await model.controller?.handleLongPress(screenPoint: screenPoint, mapPoint: nil)
+                                }
+                            }
+                    )
             }
 
             InfoBubbleContainerRepresentable(container: model.infoBubbleContainer)
@@ -202,6 +228,7 @@ private final class ArcGISMapViewModel: ObservableObject {
 
     private(set) var controller: ArcGISMapViewController?
     private var didBind = false
+    var latestTouchScreenPoint: CGPoint?
 
     let infoBubbleContainer = PassthroughContainerView()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
@@ -236,6 +263,7 @@ private final class ArcGISMapViewModel: ObservableObject {
         }
         scene.baseSurface = surface
 
+        markerLayer.renderingMode = .dynamic
         markerLayer.sceneProperties.surfacePlacement = .relative
         polylineLayer.sceneProperties.surfacePlacement = .drapedBillboarded
         polygonLayer.sceneProperties.surfacePlacement = .drapedBillboarded
@@ -285,6 +313,7 @@ private final class ArcGISMapViewModel: ObservableObject {
     func bind(
         state: ArcGISMapViewState,
         onMapClick: OnMapEventHandler?,
+        onMapLongClick: OnMapEventHandler?,
         onCameraMoveStart: OnCameraMoveHandler?,
         onCameraMove: OnCameraMoveHandler?,
         onCameraMoveEnd: OnCameraMoveHandler?
@@ -300,7 +329,7 @@ private final class ArcGISMapViewModel: ObservableObject {
         let raster = ArcGISRasterLayerController(scene: container.scene)
         let controller = ArcGISMapViewController(
             holder: holder,
-            markerController: ArcGISMarkerController(markerLayer: markerLayer),
+            markerController: ArcGISMarkerController(markerLayer: markerLayer, container: container),
             polylineController: ArcGISPolylineOverlayController(polylineLayer: polylineLayer),
             polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
@@ -311,6 +340,7 @@ private final class ArcGISMapViewModel: ObservableObject {
         state.setController(controller)
         state.setMapViewHolder(controller.holder)
         controller.setMapClickListener(listener: onMapClick)
+        controller.setMapLongClickListener(listener: onMapLongClick)
         controller.setCameraMoveStartListener(listener: onCameraMoveStart)
         controller.setCameraMoveListener(listener: onCameraMove)
         controller.setCameraMoveEndListener(listener: onCameraMoveEnd)
