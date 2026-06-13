@@ -101,6 +101,25 @@ private struct ArcGISMapViewBody: View {
                             _ = await model.controller?.handleTap(screenPoint: screenPoint, mapPoint: mapPoint)
                         }
                     }
+                    .onLongPressGesture { screenPoint, mapPoint in
+                        Task {
+                            await model.controller?.handleLongPress(screenPoint: screenPoint, mapPoint: mapPoint)
+                        }
+                    }
+                    .onDragGesture(
+                        shouldBegin: { screenPoint, mapPoint in
+                            await model.handleDragShouldBegin(screenPoint: screenPoint, mapPoint: mapPoint)
+                        },
+                        onChanged: { screenPoint, mapPoint in
+                            model.handleDragChanged(screenPoint: screenPoint, mapPoint: mapPoint)
+                        },
+                        onEnded: { screenPoint, mapPoint in
+                            model.handleDragEnded(screenPoint: screenPoint, mapPoint: mapPoint)
+                        },
+                        onCancelled: {
+                            model.handleDragCancelled()
+                        }
+                    )
                     .onDrawStatusChanged { status in
                         NSLog("[MapConductor][ArcGIS] drawStatus=%@", String(describing: status))
                     }
@@ -112,6 +131,11 @@ private struct ArcGISMapViewBody: View {
                     }
                     .onNavigatingChanged { _ in
                         model.updateInfoBubbleLayouts()
+                    }
+                    .onInteractingChanged { isInteracting in
+                        if !isInteracting {
+                            model.handleDragInteractionEnded()
+                        }
                     }
                     .onAppear {
                         NSLog("[MapConductor][ArcGIS] SceneView onAppear begin")
@@ -151,24 +175,6 @@ private struct ArcGISMapViewBody: View {
                         await model.observeSceneLoadStatus()
                     }
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                model.latestTouchScreenPoint = value.location
-                            }
-                            .onEnded { _ in
-                                model.latestTouchScreenPoint = nil
-                            }
-                    )
-                    .simultaneousGesture(
-                        LongPressGesture()
-                            .onEnded { _ in
-                                guard let screenPoint = model.latestTouchScreenPoint else { return }
-                                Task {
-                                    await model.controller?.handleLongPress(screenPoint: screenPoint, mapPoint: nil)
-                                }
-                            }
-                    )
             }
 
             InfoBubbleContainerRepresentable(container: model.infoBubbleContainer)
@@ -231,7 +237,7 @@ private final class ArcGISMapViewModel: ObservableObject {
 
     private(set) var controller: ArcGISMapViewController?
     private var didBind = false
-    var latestTouchScreenPoint: CGPoint?
+    private var dragState: MarkerDragState = .idle
 
     private var cameraMoveEndWorkItem: DispatchWorkItem?
     private let cameraMoveEndDebounceSeconds = 0.18
@@ -335,7 +341,13 @@ private final class ArcGISMapViewModel: ObservableObject {
         let raster = ArcGISRasterLayerController(scene: container.scene)
         let controller = ArcGISMapViewController(
             holder: holder,
-            markerController: ArcGISMarkerController(markerLayer: markerLayer, container: container),
+            markerController: ArcGISMarkerController(
+                markerLayer: markerLayer,
+                container: container,
+                onUpdateInfoBubble: { [weak self] id in
+                    self?.infoBubbleCoordinator?.updateInfoBubblePosition(for: id)
+                }
+            ),
             polylineController: ArcGISPolylineOverlayController(polylineLayer: polylineLayer),
             polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
@@ -371,6 +383,7 @@ private final class ArcGISMapViewModel: ObservableObject {
 
     func unbind(state: ArcGISMapViewState) {
         NSLog("[MapConductor][ArcGIS] unbind begin")
+        dragState = .idle
         state.setController(nil)
         state.setMapViewHolder(nil)
         controller = nil
@@ -378,6 +391,61 @@ private final class ArcGISMapViewModel: ObservableObject {
         infoBubbleCoordinator = nil
         didBind = false
         NSLog("[MapConductor][ArcGIS] unbind end")
+    }
+
+    func handleDragShouldBegin(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
+        guard let controller else { return false }
+        let didStart = await controller.handleMarkerDragStart(screenPoint: screenPoint, mapPoint: mapPoint)
+        dragState = didStart ? .dragging : .idle
+        return didStart
+    }
+
+    func handleDragChanged(screenPoint: CGPoint, mapPoint: Point?) {
+        guard let controller else { return }
+        switch dragState {
+        case .dragging:
+            if let mapPoint {
+                _ = controller.handleMarkerDrag(mapPoint: mapPoint)
+            } else {
+                Task { [weak controller] in
+                    _ = await controller?.handleMarkerDrag(screenPoint: screenPoint)
+                }
+            }
+        case .idle:
+            break
+        }
+    }
+
+    func handleDragEnded(screenPoint: CGPoint, mapPoint: Point?) {
+        guard let controller else {
+            dragState = .idle
+            return
+        }
+
+        switch dragState {
+        case .dragging:
+            if let mapPoint {
+                _ = controller.handleMarkerDragEnd(mapPoint: mapPoint)
+            } else {
+                Task { [weak controller] in
+                    _ = await controller?.handleMarkerDragEnd(screenPoint: screenPoint)
+                }
+            }
+        case .idle:
+            break
+        }
+        dragState = .idle
+    }
+
+    func handleDragCancelled() {
+        _ = controller?.cancelMarkerDrag()
+        dragState = .idle
+    }
+
+    func handleDragInteractionEnded() {
+        guard dragState == .dragging else { return }
+        _ = controller?.finishMarkerDrag()
+        dragState = .idle
     }
 
     func notifyCameraMove(camera: Camera) {
@@ -423,4 +491,9 @@ private final class ArcGISMapViewModel: ObservableObject {
         NSLog("[MapConductor][ArcGIS] infoBubbles synced count=%d", content.infoBubbles.count)
         NSLog("[MapConductor][ArcGIS] updateContent end")
     }
+}
+
+private enum MarkerDragState {
+    case idle
+    case dragging
 }

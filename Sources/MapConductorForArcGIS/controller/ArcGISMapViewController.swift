@@ -173,4 +173,50 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
 
         notifyMapLongClick(touchPosition)
     }
+
+    @MainActor
+    func handleMarkerDragStart(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
+        markerController.handleDragStart(screenPoint: screenPoint)
+    }
+
+    @MainActor
+    func handleMarkerDrag(screenPoint: CGPoint) async -> Bool {
+        guard let touchPosition = await geoPoint(from: screenPoint) else { return false }
+        return markerController.handleDrag(at: touchPosition)
+    }
+
+    @MainActor
+    func handleMarkerDrag(mapPoint: Point) -> Bool {
+        markerController.handleDrag(at: mapPoint.toGeoPoint())
+    }
+
+    @MainActor
+    func handleMarkerDragEnd(screenPoint: CGPoint) async -> Bool {
+        let touchPosition = await geoPoint(from: screenPoint)
+        return markerController.handleDragEnd(at: touchPosition)
+    }
+
+    @MainActor
+    func handleMarkerDragEnd(mapPoint: Point) -> Bool {
+        markerController.handleDragEnd(at: mapPoint.toGeoPoint())
+    }
+
+    @MainActor
+    func cancelMarkerDrag() -> Bool {
+        markerController.cancelDrag()
+    }
+
+    @MainActor
+    func finishMarkerDrag() -> Bool {
+        markerController.handleDragEnd(at: nil)
+    }
+
+    @MainActor
+    private func geoPoint(from screenPoint: CGPoint) async -> GeoPoint? {
+        guard let proxy = typedHolder.mapView.proxy?.proxy,
+              let point = try? await proxy.location(fromScreenPoint: screenPoint) else {
+            return nil
+        }
+        return point.toGeoPoint()
+    }
 }
