@@ -242,6 +242,8 @@ private final class ArcGISMapViewModel: ObservableObject {
     private var cameraMoveEndWorkItem: DispatchWorkItem?
     private let cameraMoveEndDebounceSeconds = 0.18
 
+    private var currentMarkerTileRasterLayer: RasterLayerState?
+
     let infoBubbleContainer = PassthroughContainerView()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
 
@@ -364,6 +366,10 @@ private final class ArcGISMapViewModel: ObservableObject {
         controller.setCameraMoveEndListener(listener: onCameraMoveEnd)
 
         let markerController = controller.markerController
+        markerController.markerTileRasterLayerCallback = { [weak self] state in
+            self?.currentMarkerTileRasterLayer = state
+        }
+
         infoBubbleCoordinator = InfoBubbleOverlayCoordinator(
             container: infoBubbleContainer,
             project: { [weak self] point in
@@ -475,12 +481,15 @@ private final class ArcGISMapViewModel: ObservableObject {
             return
         }
         NSLog("[MapConductor][ArcGIS] updateContent begin")
+        controller.markerController.tilingOptions = content.markerTilingOptions
         await controller.markerController.syncMarkers(content.markers)
         NSLog("[MapConductor][ArcGIS] markers synced count=%d", content.markers.count)
         await controller.groundImageController.syncGroundImages(content.groundImages)
         NSLog("[MapConductor][ArcGIS] groundImages synced count=%d", content.groundImages.count)
-        await controller.rasterLayerController.syncRasterLayers(content.rasterLayers)
-        NSLog("[MapConductor][ArcGIS] rasterLayers synced count=%d", content.rasterLayers.count)
+        let tileLayer = currentMarkerTileRasterLayer.map { RasterLayer(state: $0) }
+        let allRasterLayers = content.rasterLayers + (tileLayer.map { [$0] } ?? [])
+        await controller.rasterLayerController.syncRasterLayers(allRasterLayers)
+        NSLog("[MapConductor][ArcGIS] rasterLayers synced count=%d (markerTile=%d)", allRasterLayers.count, tileLayer != nil ? 1 : 0)
         await controller.circleController.syncCircles(content.circles)
         NSLog("[MapConductor][ArcGIS] circles synced count=%d", content.circles.count)
         await controller.polylineController.syncPolylines(content.polylines)

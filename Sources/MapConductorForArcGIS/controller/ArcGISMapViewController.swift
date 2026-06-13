@@ -113,6 +113,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
 
     @MainActor
     func handleTap(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
+        let clickRadiusPt: CGFloat = 44
         guard let touchPosition = mapPoint?.toGeoPoint() else { return false }
 
 //        MapConductor manages all markers by our MakerManager.
@@ -132,9 +133,13 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
 //        }
 
         
-        if let markerEntity = markerController.find(position: touchPosition) {
-            markerController.dispatchClick(state: markerEntity.state)
-            return true
+        if let markerEntity = markerController.find(position: touchPosition),
+           let markerPoint = toScreenPoint(from: markerEntity.state.position) {
+            let dist = hypot(screenPoint.x - markerPoint.x, screenPoint.y - markerPoint.y)
+            if dist < clickRadiusPt {
+                markerController.dispatchClick(state: markerEntity.state)
+                return true
+            }
         }
         
         if let circle = circleController.find(position: touchPosition) {
@@ -181,7 +186,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
 
     @MainActor
     func handleMarkerDrag(screenPoint: CGPoint) async -> Bool {
-        guard let touchPosition = await geoPoint(from: screenPoint) else { return false }
+        guard let touchPosition = await toGeoPoint(from: screenPoint) else { return false }
         return markerController.handleDrag(at: touchPosition)
     }
 
@@ -192,7 +197,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
 
     @MainActor
     func handleMarkerDragEnd(screenPoint: CGPoint) async -> Bool {
-        let touchPosition = await geoPoint(from: screenPoint)
+        let touchPosition = await toGeoPoint(from: screenPoint)
         return markerController.handleDragEnd(at: touchPosition)
     }
 
@@ -212,11 +217,19 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     }
 
     @MainActor
-    private func geoPoint(from screenPoint: CGPoint) async -> GeoPoint? {
+    private func toGeoPoint(from screenPoint: CGPoint) async -> GeoPoint? {
         guard let proxy = typedHolder.mapView.proxy?.proxy,
               let point = try? await proxy.location(fromScreenPoint: screenPoint) else {
             return nil
         }
         return point.toGeoPoint()
+    }
+    @MainActor
+    private func toScreenPoint(from geoPoint: GeoPoint) -> CGPoint? {
+        guard let proxy = typedHolder.mapView.proxy?.proxy,
+              let point = proxy.screenPoint(fromLocation: geoPoint.toArcGISPoint()) else {
+            return nil
+        }
+        return point.screenPoint
     }
 }

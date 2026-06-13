@@ -3,6 +3,7 @@ import Combine
 import CoreGraphics
 import Foundation
 import MapConductorCore
+import UIKit
 
 @MainActor
 final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMarkerRenderer> {
@@ -12,6 +13,19 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
 
     private weak var container: ArcGISSceneContainer?
     private let onUpdateInfoBubble: (String) -> Void
+
+    // MARK: - Marker tiling
+
+    var tilingOptions: MarkerTilingOptions = .Default
+    var markerTileRasterLayerCallback: ((RasterLayerState?) -> Void)?
+
+    private var tileRenderer: MarkerTileRenderer<Graphic>?
+    private var tileRouteId: String?
+    private var tiledMarkerIds: Set<String> = []
+    private var tileRasterLayerId: String?
+    private let defaultMarkerIconForTiling: BitmapIcon = DefaultMarkerIcon().toBitmapIcon()
+
+    private static let tileSize = 256
 
     init(
         markerLayer: GraphicsOverlay,
@@ -61,7 +75,71 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     }
 
     override func find(position: GeoPointProtocol) -> MarkerEntity<Graphic>? {
-        markerManager.findNearest(position: position)
+        return markerManager.findNearest(position: position) 
+    }
+
+    override func add(data: [MarkerState]) async {
+        guard tilingOptions.enabled else {
+            await super.add(data: data)
+            return
+        }
+        if tileRenderer == nil { setupTileRenderer() }
+
+        let shouldTileAll = data.count >= tilingOptions.minMarkerCount
+        var localTiledMarkerIds = tiledMarkerIds
+        let result = await MarkerIngestionEngine.ingest(
+            data: data,
+            markerManager: markerManager,
+            renderer: renderer,
+            defaultMarkerIcon: defaultMarkerIconForTiling,
+            tilingEnabled: tilingOptions.enabled,
+            tiledMarkerIds: &localTiledMarkerIds,
+            shouldTile: { [shouldTileAll] _ in shouldTileAll }
+        )
+        tiledMarkerIds = localTiledMarkerIds
+
+        if result.tiledDataChanged, let tileRenderer {
+            tileRenderer.invalidate()
+            updateTileLayer(hasTiledMarkers: result.hasTiledMarkers)
+        }
+    }
+
+    private func setupTileRenderer() {
+        let routeId = "mapconductor-arcgis-markers-\(UUID().uuidString)"
+        let contentScale = Double(UIScreen.main.scale)
+        let baseCallback = tilingOptions.iconScaleCallback
+        let scaledCallback: ((MarkerState, Int) -> Double)? = { state, zoom in
+            (baseCallback?(state, zoom) ?? 1.0) * contentScale
+        }
+        let renderer = MarkerTileRenderer<Graphic>(
+            markerManager: markerManager,
+            tileSize: Self.tileSize,
+            cacheSizeBytes: tilingOptions.cacheSize,
+            debugTileOverlay: tilingOptions.debugTileOverlay,
+            iconScaleCallback: scaledCallback
+        )
+        TileServerRegistry.get().register(routeId: routeId, provider: renderer)
+        tileRenderer = renderer
+        tileRouteId = routeId
+    }
+
+    private func updateTileLayer(hasTiledMarkers: Bool) {
+        guard hasTiledMarkers, let routeId = tileRouteId, let tileRenderer else {
+            if tileRasterLayerId != nil {
+                tileRasterLayerId = nil
+                markerTileRasterLayerCallback?(nil)
+            }
+            return
+        }
+        let server = TileServerRegistry.get()
+        let urlTemplate = server.urlTemplate(routeId: routeId, tileSize: tileRenderer.tileSize)
+        let layerId = tileRasterLayerId ?? "marker-tile-\(routeId)"
+        tileRasterLayerId = layerId
+        let state = RasterLayerState(
+            source: .urlTemplate(template: urlTemplate, tileSize: tileRenderer.tileSize),
+            id: layerId
+        )
+        markerTileRasterLayerCallback?(state)
     }
 
     func unbind() {
@@ -69,6 +147,14 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         markerSubscriptions.removeAll()
         markerStatesById.removeAll()
         draggingMarkerId = nil
+        tileRenderer = nil
+        if let routeId = tileRouteId {
+            TileServerRegistry.get().unregister(routeId: routeId)
+        }
+        tileRouteId = nil
+        tiledMarkerIds.removeAll()
+        tileRasterLayerId = nil
+        markerTileRasterLayerCallback = nil
         renderer.unbind()
         destroy()
     }
