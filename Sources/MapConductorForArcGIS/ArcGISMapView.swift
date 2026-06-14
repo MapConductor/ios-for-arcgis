@@ -351,7 +351,7 @@ private final class ArcGISMapViewModel: ObservableObject {
                 }
             ),
             polylineController: ArcGISPolylineOverlayController(polylineLayer: polylineLayer),
-            polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer),
+            polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer, scene: container.scene),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: container.scene),
             rasterLayerController: raster
