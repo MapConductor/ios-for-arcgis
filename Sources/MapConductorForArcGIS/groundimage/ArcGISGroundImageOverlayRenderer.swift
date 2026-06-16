@@ -6,7 +6,7 @@ final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer
     private weak var scene: ArcGIS.Scene?
     private let tileServer: LocalTileServer
 
-    init(scene: ArcGIS.Scene, tileServer: LocalTileServer = TileServerRegistry.get(forceNoStoreCache: true)) {
+    init(scene: ArcGIS.Scene?, tileServer: LocalTileServer = TileServerRegistry.get(forceNoStoreCache: true)) {
         self.scene = scene
         self.tileServer = tileServer
         super.init()

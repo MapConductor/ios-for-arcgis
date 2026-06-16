@@ -4,17 +4,36 @@ import MapConductorCore
 
 @MainActor
 final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer<Layer> {
-    private weak var scene: ArcGIS.Scene?
+    private let addLayer: (Layer) -> Void
+    private let removeLayerFn: (Layer) -> Void
 
-    init(scene: ArcGIS.Scene) {
-        self.scene = scene
+    convenience init(scene: ArcGIS.Scene) {
+        self.init(
+            addLayer: { [weak scene] layer in scene?.addOperationalLayer(layer) },
+            removeLayer: { [weak scene] layer in scene?.removeOperationalLayer(layer) }
+        )
+    }
+
+    convenience init(map: ArcGIS.Map) {
+        self.init(
+            addLayer: { [weak map] layer in map?.addOperationalLayer(layer) },
+            removeLayer: { [weak map] layer in map?.removeOperationalLayer(layer) }
+        )
+    }
+
+    init(addLayer: @escaping (Layer) -> Void, removeLayer: @escaping (Layer) -> Void) {
+        self.addLayer = addLayer
+        self.removeLayerFn = removeLayer
         super.init()
     }
 
     override func createLayer(state: RasterLayerState) async -> Layer? {
-        guard let scene, let layer = makeLayer(from: state) else { return nil }
+        guard let layer = makeLayer(from: state) else { return nil }
         apply(state: state, to: layer)
-        scene.addOperationalLayer(layer)
+        if state.debug {
+            NSLog("[MapConductor] RasterLayer debug mode: id=%@", state.id)
+        }
+        addLayer(layer)
         return layer
     }
 
@@ -25,10 +44,16 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
     ) async -> Layer? {
         if current.fingerPrint.source != prev.fingerPrint.source {
             await removeLayer(entity: prev)
-            guard let scene, let newLayer = makeLayer(from: current.state) else { return nil }
+            guard let newLayer = makeLayer(from: current.state) else { return nil }
             apply(state: current.state, to: newLayer)
-            scene.addOperationalLayer(newLayer)
+            if current.state.debug {
+                NSLog("[MapConductor] RasterLayer debug mode: id=%@", current.state.id)
+            }
+            addLayer(newLayer)
             return newLayer
+        }
+        if current.fingerPrint.debug != prev.fingerPrint.debug && current.state.debug {
+            NSLog("[MapConductor] RasterLayer debug mode: id=%@", current.state.id)
         }
         apply(state: current.state, to: layer)
         return layer
@@ -36,7 +61,7 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
 
     override func removeLayer(entity: RasterLayerEntity<Layer>) async {
         guard let layer = entity.layer else { return }
-        scene?.removeOperationalLayer(layer)
+        removeLayerFn(layer)
     }
 
     private func apply(state: RasterLayerState, to layer: Layer) {

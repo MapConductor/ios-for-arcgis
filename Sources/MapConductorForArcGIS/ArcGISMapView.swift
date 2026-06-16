@@ -150,6 +150,7 @@ private struct ArcGISMapViewBody: View {
                             onCameraMoveEnd: onCameraMoveEnd
                         )
                         NSLog("[MapConductor][ArcGIS] model bound")
+                        model.controller?.notifyMapInitialized()
                         onMapLoaded?(state)
                         NSLog("[MapConductor][ArcGIS] SceneView onAppear end")
                     }
@@ -189,7 +190,11 @@ private struct ArcGISMapViewBody: View {
 private extension MapViewContent {
     var identityFingerprint: Int {
         var hasher = Hasher()
-        markers.forEach { hasher.combine($0.id) }
+        markers.forEach {
+            hasher.combine($0.id)
+            hasher.combine($0.state.position.latitude)
+            hasher.combine($0.state.position.longitude)
+        }
         polylines.forEach { hasher.combine($0.id) }
         polygons.forEach { hasher.combine($0.id) }
         circles.forEach { hasher.combine($0.id) }
@@ -364,6 +369,7 @@ private final class ArcGISMapViewModel: ObservableObject {
         controller.setCameraMoveStartListener(listener: onCameraMoveStart)
         controller.setCameraMoveListener(listener: onCameraMove)
         controller.setCameraMoveEndListener(listener: onCameraMoveEnd)
+        controller.setMapDesignTypeChangeListener(listener: { [weak state] value in state?.onMapDesignTypeChange(value: value) })
 
         let markerController = controller.markerController
         markerController.markerTileRasterLayerCallback = { [weak self] state in
@@ -390,7 +396,7 @@ private final class ArcGISMapViewModel: ObservableObject {
     func unbind(state: ArcGISMapViewState) {
         NSLog("[MapConductor][ArcGIS] unbind begin")
         dragState = .idle
-        state.setController(nil)
+        state.setController(nil as ArcGISMapViewController?)
         state.setMapViewHolder(nil)
         controller = nil
         infoBubbleCoordinator?.unbind()
@@ -460,11 +466,59 @@ private final class ArcGISMapViewModel: ObservableObject {
         controller?.notifyCameraMove(position)
 
         cameraMoveEndWorkItem?.cancel()
+        let viewportSize = container.viewportSize
         let workItem = DispatchWorkItem { [weak self] in
-            self?.controller?.notifyCameraMoveEnd(position)
+            guard let self else { return }
+            let vr = Self.computeVisibleRegion(for: position, viewportSize: viewportSize)
+            let posWithVR = MapCameraPosition(
+                position: position.position,
+                zoom: position.zoom,
+                bearing: position.bearing,
+                tilt: position.tilt,
+                paddings: position.paddings,
+                visibleRegion: vr
+            )
+            self.controller?.notifyCameraMoveEnd(posWithVR)
         }
         cameraMoveEndWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + cameraMoveEndDebounceSeconds, execute: workItem)
+    }
+
+    private static func computeVisibleRegion(for position: MapCameraPosition, viewportSize: CGSize?) -> VisibleRegion? {
+        guard let size = viewportSize, size.width > 0, size.height > 0 else { return nil }
+
+        let center = GeoPoint.from(position: position.position)
+        let latRad = center.latitude * .pi / 180
+        // bearing θ: screen-up direction corresponds to geographic bearing θ
+        let θ = position.bearing * .pi / 180
+
+        // Web-Mercator ground resolution: metres per pixel at this zoom and latitude
+        let metersPerPixel = (2 * .pi * 6_371_000.0 * cos(latRad)) / (256.0 * pow(2.0, position.zoom))
+
+        let halfW = Double(size.width) / 2
+        let halfH = Double(size.height) / 2
+
+        // Convert screen offset (sx right, sy down) → geographic offset (east, north in metres)
+        // geo_east  =  (sx·cos θ − sy·sin θ) · m/px
+        // geo_north = (−sx·sin θ − sy·cos θ) · m/px
+        func cornerGeo(sxPx: Double, syPx: Double) -> GeoPoint {
+            let eastM  = ( sxPx * cos(θ) - syPx * sin(θ)) * metersPerPixel
+            let northM = (-sxPx * sin(θ) - syPx * cos(θ)) * metersPerPixel
+            let dLat = northM / 111_000.0
+            let dLng = eastM  / (111_000.0 * cos(latRad))
+            return GeoPoint(latitude: center.latitude + dLat, longitude: center.longitude + dLng)
+        }
+
+        // Screen corners: sx = signed x from centre, sy = signed y from centre (down positive)
+        let nl = cornerGeo(sxPx: -halfW, syPx: +halfH)  // bottom-left  → nearLeft
+        let nr = cornerGeo(sxPx: +halfW, syPx: +halfH)  // bottom-right → nearRight
+        let fl = cornerGeo(sxPx: -halfW, syPx: -halfH)  // top-left     → farLeft
+        let fr = cornerGeo(sxPx: +halfW, syPx: -halfH)  // top-right    → farRight
+
+        let bounds = GeoRectBounds()
+        [nl, nr, fl, fr].forEach { bounds.extend(point: $0) }
+
+        return VisibleRegion(bounds: bounds, nearLeft: nl, nearRight: nr, farLeft: fl, farRight: fr)
     }
 
     func syncInfoBubbles(_ bubbles: [InfoBubble]) {

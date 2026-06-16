@@ -8,7 +8,7 @@ final class ArcGISGroundImageController: GroundImageController<ArcGISGroundImage
     private var statesById: [String: GroundImageState] = [:]
     private var subscriptions: [String: AnyCancellable] = [:]
 
-    init(scene: ArcGIS.Scene) {
+    init(scene: ArcGIS.Scene?) {
         super.init(groundImageManager: GroundImageManager<ArcGISGroundImageHandle>(), renderer: ArcGISGroundImageOverlayRenderer(scene: scene))
     }
 

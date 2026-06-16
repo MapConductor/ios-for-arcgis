@@ -2,9 +2,9 @@ import ArcGIS
 import Foundation
 import MapConductorCore
 
-final class ArcGISMapViewController: MapViewControllerProtocol {
+final class ArcGISMapView2DController: MapViewControllerProtocol {
     let holder: AnyMapViewHolder
-    let typedHolder: ArcGISMapViewHolder
+    let typedHolder: ArcGISMapViewHolder2D
     let coroutine = CoroutineScope()
 
     let markerController: ArcGISMarkerController
@@ -23,7 +23,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     private var mapDesignTypeChangeListener: ArcGISDesignTypeChangeHandler?
 
     init(
-        holder: ArcGISMapViewHolder,
+        holder: ArcGISMapViewHolder2D,
         markerController: ArcGISMarkerController,
         polylineController: ArcGISPolylineOverlayController,
         polygonController: ArcGISPolygonOverlayController,
@@ -50,51 +50,28 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         await rasterLayerController.clear()
     }
 
-    func setCameraMoveStartListener(listener: OnCameraMoveHandler?) {
-        cameraMoveStartListener = listener
-    }
-
-    func setCameraMoveListener(listener: OnCameraMoveHandler?) {
-        cameraMoveListener = listener
-    }
-
-    func setCameraMoveEndListener(listener: OnCameraMoveHandler?) {
-        cameraMoveEndListener = listener
-    }
-
-    func setMapClickListener(listener: OnMapEventHandler?) {
-        mapClickListener = listener
-    }
-
-    func setMapLongClickListener(listener: OnMapEventHandler?) {
-        mapLongClickListener = listener
-    }
-
-    func setMapInitializedListener(listener: OnMapInitializedHandler?) {
-        mapInitializedListener = listener
-    }
-
-    func setMapDesignTypeChangeListener(listener: ArcGISDesignTypeChangeHandler?) {
-        mapDesignTypeChangeListener = listener
-    }
+    func setCameraMoveStartListener(listener: OnCameraMoveHandler?) { cameraMoveStartListener = listener }
+    func setCameraMoveListener(listener: OnCameraMoveHandler?) { cameraMoveListener = listener }
+    func setCameraMoveEndListener(listener: OnCameraMoveHandler?) { cameraMoveEndListener = listener }
+    func setMapClickListener(listener: OnMapEventHandler?) { mapClickListener = listener }
+    func setMapLongClickListener(listener: OnMapEventHandler?) { mapLongClickListener = listener }
+    func setMapInitializedListener(listener: OnMapInitializedHandler?) { mapInitializedListener = listener }
+    func setMapDesignTypeChangeListener(listener: ArcGISDesignTypeChangeHandler?) { mapDesignTypeChangeListener = listener }
 
     func moveCamera(position: MapCameraPosition) {
         typedHolder.mapView.lastCameraPosition = position
-        Task {
-            let viewportSize = typedHolder.mapView.viewportSize
-            typedHolder.mapView.proxy?.proxy.setViewpointCamera(position.toArcGISCamera(viewportSize: viewportSize))
+        Task { @MainActor in
+            let viewpoint = toViewpoint(position)
+            _ = await typedHolder.mapView.proxy?.proxy.setViewpoint(viewpoint)
         }
     }
 
     func animateCamera(position: MapCameraPosition, duration: Long) {
         typedHolder.mapView.lastCameraPosition = position
-        Task {
-            let viewportSize = typedHolder.mapView.viewportSize
+        Task { @MainActor in
+            let viewpoint = toViewpoint(position)
             cameraMoveStartListener?(position)
-            await typedHolder.mapView.proxy?.proxy.setViewpointCamera(
-                position.toArcGISCamera(viewportSize: viewportSize),
-                duration: Double(duration) / 1000
-            )
+            await typedHolder.mapView.proxy?.proxy.setViewpoint(viewpoint, duration: Double(duration) / 1000)
             cameraMoveEndListener?(position)
         }
     }
@@ -114,49 +91,22 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         cameraMoveEndListener?(cameraPosition)
     }
 
-    func notifyMapClick(_ point: GeoPoint) {
-        mapClickListener?(point)
-    }
-
-    func notifyMapLongClick(_ point: GeoPoint) {
-        mapLongClickListener?(point)
-    }
-
-    func notifyMapInitialized() {
-        mapInitializedListener?(.MapCreated)
-    }
+    func notifyMapClick(_ point: GeoPoint) { mapClickListener?(point) }
+    func notifyMapLongClick(_ point: GeoPoint) { mapLongClickListener?(point) }
+    func notifyMapInitialized() { mapInitializedListener?(.MapCreated) }
 
     @MainActor
     func handleTap(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
-        let clickRadiusPt: CGFloat = 44
         guard let touchPosition = mapPoint?.toGeoPoint() else { return false }
 
-//        MapConductor manages all markers by our MakerManager.
-//        We don't use SDK's semantic logic. Therefore, the following code does not work.
-//
-//        if let result = try? await typedHolder.mapView.proxy?.proxy.identify(
-//            on: markerController.renderer.markerLayer,
-//            screenPoint: screenPoint,
-//           tolerance: 12,
-//           maximumResults: 1
-//        ),
-//           let graphic = result.graphics.first,
-//           let markerId = graphic.attributeValue(forKey: "id") as? String,
-//           let entity = markerController.markerManager.getEntity(markerId) {
-//            markerController.dispatchClick(state: entity.state)
-//            return true
-//        }
-
-        
         if let markerEntity = markerController.find(position: touchPosition),
            let markerPoint = toScreenPoint(from: markerEntity.state.position) {
             let dist = hypot(screenPoint.x - markerPoint.x, screenPoint.y - markerPoint.y)
-            if dist < clickRadiusPt {
+            if dist < 44 {
                 markerController.dispatchClick(state: markerEntity.state)
                 return true
             }
         }
-        
         if let circle = circleController.find(position: touchPosition) {
             circleController.dispatchClick(event: CircleEvent(state: circle.state, clicked: touchPosition))
             return true
@@ -188,63 +138,29 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         } else {
             touchPosition = nil
         }
-
         guard let touchPosition else { return }
-
         notifyMapLongClick(touchPosition)
     }
 
-    @MainActor
-    func handleMarkerDragStart(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
-        markerController.handleDragStart(screenPoint: screenPoint)
+    private func toViewpoint(_ position: MapCameraPosition) -> Viewpoint {
+        let point = position.position.toArcGISPoint(spatialReference: .wgs84)
+        let scale = ArcGISMapView2DController.zoomToScale(position.zoom, latitude: position.position.latitude)
+        return Viewpoint(center: point, scale: scale)
     }
 
-    @MainActor
-    func handleMarkerDrag(screenPoint: CGPoint) async -> Bool {
-        guard let touchPosition = await toGeoPoint(from: screenPoint) else { return false }
-        return markerController.handleDrag(at: touchPosition)
-    }
-
-    @MainActor
-    func handleMarkerDrag(mapPoint: Point) -> Bool {
-        markerController.handleDrag(at: mapPoint.toGeoPoint())
-    }
-
-    @MainActor
-    func handleMarkerDragEnd(screenPoint: CGPoint) async -> Bool {
-        let touchPosition = await toGeoPoint(from: screenPoint)
-        return markerController.handleDragEnd(at: touchPosition)
-    }
-
-    @MainActor
-    func handleMarkerDragEnd(mapPoint: Point) -> Bool {
-        markerController.handleDragEnd(at: mapPoint.toGeoPoint())
-    }
-
-    @MainActor
-    func cancelMarkerDrag() -> Bool {
-        markerController.cancelDrag()
-    }
-
-    @MainActor
-    func finishMarkerDrag() -> Bool {
-        markerController.handleDragEnd(at: nil)
-    }
-
-    @MainActor
-    private func toGeoPoint(from screenPoint: CGPoint) async -> GeoPoint? {
-        guard let proxy = typedHolder.mapView.proxy?.proxy,
-              let point = try? await proxy.location(fromScreenPoint: screenPoint) else {
-            return nil
-        }
-        return point.toGeoPoint()
-    }
     @MainActor
     private func toScreenPoint(from geoPoint: GeoPoint) -> CGPoint? {
-        guard let proxy = typedHolder.mapView.proxy?.proxy,
-              let point = proxy.screenPoint(fromLocation: geoPoint.toArcGISPoint()) else {
-            return nil
-        }
-        return point.screenPoint
+        typedHolder.mapView.proxy?.proxy.screenPoint(fromLocation: geoPoint.toArcGISPoint())
+    }
+
+    static func zoomToScale(_ zoom: Double, latitude: Double) -> Double {
+        let resolution = 2.0 * .pi * 6378137.0 * cos(.pi * latitude / 180.0) / (256.0 * pow(2.0, zoom))
+        return resolution * 96.0 * 39.37
+    }
+
+    static func scaleToZoom(_ scale: Double, latitude: Double) -> Double {
+        let resolution = scale / (96.0 * 39.37)
+        let numerator = 2.0 * .pi * 6378137.0 * cos(.pi * latitude / 180.0)
+        return log2(numerator / (256.0 * resolution))
     }
 }

@@ -71,6 +71,16 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
         }
     }
 
+    func setController(_ controller: ArcGISMapView2DController?) {
+        if let controller {
+            controller.moveCamera(position: cameraPosition)
+        }
+    }
+
+    func onMapDesignTypeChange(value: ArcGISMapDesignType) {
+        _mapDesignType = value
+    }
+
     func setMapViewHolder(_ holder: AnyMapViewHolder?) {
         mapViewHolder = holder
     }

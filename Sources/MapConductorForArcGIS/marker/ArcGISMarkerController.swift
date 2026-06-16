@@ -11,7 +11,7 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     private var markerSubscriptions: [String: AnyCancellable] = [:]
     private var draggingMarkerId: String?
 
-    private weak var container: ArcGISSceneContainer?
+    private weak var container: (any ArcGISMapContext)?
     private let onUpdateInfoBubble: (String) -> Void
 
     // MARK: - Marker tiling
@@ -29,7 +29,7 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
 
     init(
         markerLayer: GraphicsOverlay,
-        container: ArcGISSceneContainer,
+        container: any ArcGISMapContext,
         onUpdateInfoBubble: @escaping (String) -> Void
     ) {
         self.container = container
@@ -200,14 +200,14 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     }
 
     private func draggableMarker(at screenPoint: CGPoint) -> MarkerEntity<Graphic>? {
-        guard let proxy = container?.proxy?.proxy else { return nil }
+        guard let container else { return nil }
 
         var bestEntity: MarkerEntity<Graphic>?
         var bestDistance = CGFloat.infinity
 
         for entity in markerManager.allEntities() where entity.state.draggable {
             let location = entity.state.position.toArcGISPoint(spatialReference: .wgs84)
-            guard let projected = proxy.screenPoint(fromLocation: location)?.screenPoint else { continue }
+            guard let projected = container.screenPoint(fromLocation: location) else { continue }
 
             let icon = (entity.state.icon ?? DefaultMarkerIcon()).toBitmapIcon()
             let radius = max(22, max(icon.size.width, icon.size.height) * 0.5)

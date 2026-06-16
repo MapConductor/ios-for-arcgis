@@ -6,6 +6,7 @@ public protocol ArcGISMapDesignTypeProtocol: MapDesignTypeProtocol where Identif
 }
 
 public typealias ArcGISMapDesignType = any ArcGISMapDesignTypeProtocol
+public typealias ArcGISDesignTypeChangeHandler = (ArcGISMapDesignType) -> Void
 
 public struct ArcGISDesign: ArcGISMapDesignTypeProtocol, Hashable {
     public let id: String

@@ -12,6 +12,7 @@ final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graph
     override func createPolyline(state: PolylineState) async -> Graphic? {
         let graphic = Graphic(geometry: makeGeometry(state), symbol: makeSymbol(state))
         graphic.setAttributeValue(state.id, forKey: "id")
+        graphic.setAttributeValue(state.zIndex, forKey: "zIndex")
         polylineLayer.addGraphic(graphic)
         return graphic
     }
@@ -34,6 +35,14 @@ final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graph
         if let polyline = entity.polyline {
             polylineLayer.removeGraphic(polyline)
         }
+    }
+
+    override func onPostProcess() async {
+        let sorted = polylineLayer.graphics.sorted {
+            (($0.attributeValue(forKey: "zIndex") as? Int) ?? 0) < (($1.attributeValue(forKey: "zIndex") as? Int) ?? 0)
+        }
+        polylineLayer.removeAllGraphics()
+        sorted.forEach { polylineLayer.addGraphic($0) }
     }
 
     private func makeGeometry(_ state: PolylineState) -> Geometry {

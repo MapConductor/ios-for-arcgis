@@ -9,14 +9,14 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
     private static let maxConcurrentAnimations = 30
 
     let markerLayer: GraphicsOverlay
-    private weak var container: ArcGISSceneContainer?
+    private weak var container: (any ArcGISMapContext)?
     private var markerAnimationRunners: [String: MarkerAnimationRunner] = [:]
     private var deferredAnimateAttemptsById: [String: Int] = [:]
 
     var animateStartListener: OnMarkerEventHandler?
     var animateEndListener: OnMarkerEventHandler?
 
-    init(markerLayer: GraphicsOverlay, container: ArcGISSceneContainer) {
+    init(markerLayer: GraphicsOverlay, container: any ArcGISMapContext) {
         self.markerLayer = markerLayer
         self.container = container
     }
@@ -37,6 +37,9 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
                 && !(params.current.state.getAnimation() != nil && markerAnimationRunners[params.current.state.id] == nil)
             if params.current.fingerPrint.icon != params.prev.fingerPrint.icon {
                 graphic.symbol = makeSymbol(bitmapIcon: params.bitmapIcon)
+            }
+            if params.current.fingerPrint.zIndex != params.prev.fingerPrint.zIndex {
+                graphic.setAttributeValue(params.current.state.zIndex ?? 0, forKey: "zIndex")
             }
             return graphic
         }
@@ -65,7 +68,13 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
         }
     }
 
-    func onPostProcess() async {}
+    func onPostProcess() async {
+        let sorted = markerLayer.graphics.sorted {
+            (($0.attributeValue(forKey: "zIndex") as? Int) ?? 0) < (($1.attributeValue(forKey: "zIndex") as? Int) ?? 0)
+        }
+        markerLayer.removeAllGraphics()
+        sorted.forEach { markerLayer.addGraphic($0) }
+    }
 
     func unbind() {
         markerAnimationRunners.values.forEach { $0.stop() }
@@ -80,7 +89,7 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
         duration: CFTimeInterval
     ) async {
         guard let graphic = entity.marker else { return }
-        guard let container, let proxy = container.proxy?.proxy else {
+        guard let container else {
             await deferAnimate(entity: entity)
             return
         }
@@ -99,7 +108,7 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
             altitude: entity.state.position.altitude ?? 0
         )
         let targetPoint = targetGeoPoint.toArcGISPoint(spatialReference: SpatialReference.wgs84)
-        guard let targetScreenPoint = proxy.screenPoint(fromLocation: targetPoint)?.screenPoint,
+        guard let targetScreenPoint = container.screenPoint(fromLocation: targetPoint),
               targetScreenPoint.x.isFinite,
               targetScreenPoint.y.isFinite else {
             await deferAnimate(entity: entity)
@@ -113,14 +122,13 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
         }
 
         let startScreenPoint = CGPoint(x: targetScreenPoint.x, y: Self.animationStartY(in: bounds))
-        guard let startPoint = try? await proxy.location(fromScreenPoint: startScreenPoint) else {
+        guard let startGeoPoint = await container.location(fromScreenPoint: startScreenPoint) else {
             await deferAnimate(entity: entity)
             return
         }
 
-        let startGeoPoint = startPoint.toGeoPoint()
         let pathPoints = animation == .Bounce
-            ? await bouncePath(for: proxy, targetScreenPoint: targetScreenPoint, target: targetGeoPoint)
+            ? await bouncePath(for: container, targetScreenPoint: targetScreenPoint, target: targetGeoPoint)
             : MarkerAnimationRunner.makeLinearPath(start: startGeoPoint, target: targetGeoPoint)
 
         graphic.geometry = startGeoPoint.toArcGISPoint(spatialReference: SpatialReference.wgs84)
@@ -179,7 +187,7 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
     }
 
     private func bouncePath(
-        for proxy: SceneViewProxy,
+        for container: any ArcGISMapContext,
         targetScreenPoint: CGPoint,
         target: GeoPoint
     ) async -> [GeoPoint] {
@@ -189,8 +197,8 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
             let progress = Double(index) / Double(bounces * 10)
             let bounce = abs(sin(progress * Double.pi * Double(bounces))) * (1.0 - progress)
             let y = targetScreenPoint.y - bounce * 80.0
-            if let point = try? await proxy.location(fromScreenPoint: CGPoint(x: targetScreenPoint.x, y: y)) {
-                points.append(point.toGeoPoint())
+            if let point = await container.location(fromScreenPoint: CGPoint(x: targetScreenPoint.x, y: y)) {
+                points.append(point)
             }
         }
         if points.isEmpty || points.last != target {
@@ -205,6 +213,7 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
             symbol: makeSymbol(bitmapIcon: bitmapIcon)
         )
         graphic.setAttributeValue(state.id, forKey: "id")
+        graphic.setAttributeValue(state.zIndex ?? 0, forKey: "zIndex")
         graphic.isVisible = state.getAnimation() == nil
         return graphic
     }

@@ -12,6 +12,10 @@ final class ArcGISRasterLayerController: RasterLayerController<Layer, ArcGISRast
         super.init(rasterLayerManager: RasterLayerManager<Layer>(), renderer: ArcGISRasterLayerOverlayRenderer(scene: scene))
     }
 
+    init(map: ArcGIS.Map) {
+        super.init(rasterLayerManager: RasterLayerManager<Layer>(), renderer: ArcGISRasterLayerOverlayRenderer(map: map))
+    }
+
     func syncRasterLayers(_ layers: [MapConductorCore.RasterLayer]) async {
         let newIds = Set(layers.map(\.id))
         let oldIds = Set(statesById.keys)
