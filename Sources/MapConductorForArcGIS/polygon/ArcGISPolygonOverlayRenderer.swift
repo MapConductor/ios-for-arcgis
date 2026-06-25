@@ -22,7 +22,6 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
             return graphic
         } else {
             ensureMask(state: state)
-            var noFillState = state
             let graphic = Graphic(
                 geometry: makeGeometry(state, ignoreFill: true),
                 symbol: makeSymbolStrokeOnly(state)
@@ -48,22 +47,17 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
         let hadHoles = !prev.state.holes.isEmpty
         let hasHoles = !current.state.holes.isEmpty
 
-        if shapeChanged || hadHoles != hasHoles {
-            polygonLayer.removeGraphic(polygon)
-            removeMask(id: current.state.id)
-            return await createPolygon(state: current.state)
+        if shapeChanged {
+            polygon.geometry = makeGeometry(current.state, ignoreFill: hasHoles)
         }
 
         if hasHoles {
-            masks[current.state.id]?.tileRenderer.update(
-                points: current.state.points,
-                holes: current.state.holes,
-                fillColor: current.state.fillColor,
-                geodesic: current.state.geodesic
-            )
+            ensureMask(state: current.state)
             polygon.symbol = makeSymbolStrokeOnly(current.state)
         } else {
-            polygon.geometry = makeGeometry(current.state)
+            if hadHoles {
+                removeMask(id: current.state.id)
+            }
             polygon.symbol = makeSymbol(current.state)
         }
         polygon.setAttributeValue(current.state.zIndex, forKey: "zIndex")
@@ -78,8 +72,14 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
     }
 
     override func onPostProcess() async {
-        let sorted = polygonLayer.graphics.sorted {
+        let graphics = Array(polygonLayer.graphics)
+        guard graphics.count > 1 else { return }
+
+        let sorted = graphics.sorted {
             (($0.attributeValue(forKey: "zIndex") as? Int) ?? 0) < (($1.attributeValue(forKey: "zIndex") as? Int) ?? 0)
+        }
+        if zip(graphics, sorted).allSatisfy({ $0 === $1 }) {
+            return
         }
         polygonLayer.removeAllGraphics()
         sorted.forEach { polygonLayer.addGraphic($0) }

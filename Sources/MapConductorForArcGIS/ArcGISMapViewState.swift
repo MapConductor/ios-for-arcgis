@@ -7,6 +7,7 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
 
     @Published private var _cameraPosition: MapCameraPosition
     @Published private var _mapDesignType: ArcGISMapDesignType
+    @Published private var _uiSettings: MapUISettings
 
     private var controller: ArcGISMapViewController?
     private var mapViewHolder: AnyMapViewHolder?
@@ -22,22 +23,30 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
         }
     }
 
+    public override var uiSettings: MapUISettings {
+        get { _uiSettings }
+        set { _uiSettings = newValue }
+    }
+
     public init(
         id: String,
         mapDesignType: ArcGISMapDesignType = ArcGISDesign.Streets,
-        cameraPosition: MapCameraPosition = .Default
+        cameraPosition: MapCameraPosition = .Default,
+        uiSettings: MapUISettings = MapUISettings()
     ) {
         self.stateId = id
         self._mapDesignType = mapDesignType
         self._cameraPosition = cameraPosition
+        self._uiSettings = uiSettings
         super.init()
     }
 
     public convenience init(
         mapDesignType: ArcGISMapDesignType = ArcGISDesign.Streets,
-        cameraPosition: MapCameraPosition = .Default
+        cameraPosition: MapCameraPosition = .Default,
+        uiSettings: MapUISettings = MapUISettings()
     ) {
-        self.init(id: UUID().uuidString, mapDesignType: mapDesignType, cameraPosition: cameraPosition)
+        self.init(id: UUID().uuidString, mapDesignType: mapDesignType, cameraPosition: cameraPosition, uiSettings: uiSettings)
     }
 
     public override func moveCameraTo(cameraPosition: MapCameraPosition, durationMillis: Long? = 0) {
@@ -51,6 +60,10 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
         } else {
             _cameraPosition = resolved
         }
+    }
+
+    public override func fitBounds(bounds: GeoRectBounds, padding: Int) {
+        controller?.fitBounds(bounds: bounds, padding: padding)
     }
 
     public override func moveCameraTo(position: GeoPoint, durationMillis: Long? = 0) {

@@ -183,6 +183,12 @@ private struct ArcGISMapViewBody: View {
             ForEach(0..<content.views.count, id: \.self) { index in
                 content.views[index]
             }
+
+            if !state.uiSettings.scrollGesture {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .highPriorityGesture(DragGesture())
+            }
         }
     }
 }

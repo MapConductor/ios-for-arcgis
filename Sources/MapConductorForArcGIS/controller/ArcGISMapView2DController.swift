@@ -76,6 +76,22 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         }
     }
 
+    func fitBounds(bounds: GeoRectBounds, padding: Int) {
+        guard let sw = bounds.southWest,
+              let ne = bounds.northEast else { return }
+        let envelope = Envelope(
+            xMin: sw.longitude,
+            yMin: sw.latitude,
+            xMax: ne.longitude,
+            yMax: ne.latitude,
+            spatialReference: .wgs84
+        )
+        let viewpoint = Viewpoint(boundingGeometry: envelope)
+        Task { @MainActor in
+            _ = await typedHolder.mapView.proxy?.proxy.setViewpoint(viewpoint)
+        }
+    }
+
     func setMapDesignType(_ value: ArcGISMapDesignType) {
         typedHolder.map.basemap = Basemap(style: ArcGISDesign.toBasemapStyle(value))
         mapDesignTypeChangeListener?(value)
