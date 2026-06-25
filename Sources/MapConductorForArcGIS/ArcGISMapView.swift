@@ -4,11 +4,6 @@ import Foundation
 import MapConductorCore
 import SwiftUI
 
-private typealias ArcGISStrategyController = StrategyMarkerController<
-    Graphic,
-    AnyMarkerRenderingStrategy<Graphic>,
-    ArcGISMarkerRenderer
->
 
 public struct ArcGISMapView: View {
     @ObservedObject private var state: ArcGISMapViewState
@@ -267,10 +262,12 @@ private final class ArcGISMapViewModel: ObservableObject {
 
     private var currentMarkerTileRasterLayer: RasterLayerState?
 
-    private var strategyMarkerController: ArcGISStrategyController?
-    private var strategyMarkerRenderer: ArcGISMarkerRenderer?
-    private var strategyMarkerSubscriptions: [String: AnyCancellable] = [:]
-    private var strategyMarkerStatesById: [String: MarkerState] = [:]
+    private lazy var strategyManager = StrategyMarkerManager<Graphic, ArcGISMarkerRenderer>(
+        makeRenderer: { [weak self] _ in
+            guard let self else { fatalError("self unavailable") }
+            return ArcGISMarkerRenderer(markerLayer: self.markerLayer, container: self.container)
+        }
+    )
 
     let infoBubbleContainer = PassthroughContainerView()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
@@ -422,13 +419,7 @@ private final class ArcGISMapViewModel: ObservableObject {
         state.setController(nil as ArcGISMapViewController?)
         state.setMapViewHolder(nil)
         controller = nil
-        strategyMarkerSubscriptions.values.forEach { $0.cancel() }
-        strategyMarkerSubscriptions.removeAll()
-        strategyMarkerStatesById.removeAll()
-        strategyMarkerRenderer?.unbind()
-        strategyMarkerRenderer = nil
-        strategyMarkerController?.destroy()
-        strategyMarkerController = nil
+        strategyManager.clear()
         infoBubbleCoordinator?.unbind()
         infoBubbleCoordinator = nil
         didBind = false
@@ -510,7 +501,7 @@ private final class ArcGISMapViewModel: ObservableObject {
             )
             self.controller?.notifyCameraMoveEnd(posWithVR)
             Task { [weak self] in
-                await self?.strategyMarkerController?.onCameraChanged(mapCameraPosition: posWithVR)
+                await self?.strategyManager.onCameraChanged(posWithVR)
             }
         }
         cameraMoveEndWorkItem = workItem
@@ -562,86 +553,6 @@ private final class ArcGISMapViewModel: ObservableObject {
         infoBubbleCoordinator?.updateAllLayouts()
     }
 
-    private func updateStrategyRendering(_ content: MapViewContent) {
-        if let strategy = content.markerRenderingStrategy as? AnyMarkerRenderingStrategy<Graphic> {
-            if strategyMarkerController == nil ||
-                strategyMarkerController?.markerManager !== strategy.markerManager {
-                strategyMarkerRenderer?.unbind()
-                let renderer = ArcGISMarkerRenderer(markerLayer: markerLayer, container: container)
-                strategyMarkerRenderer = renderer
-                strategyMarkerController = ArcGISStrategyController(strategy: strategy, renderer: renderer)
-                Task { [weak self] in
-                    guard let self else { return }
-                    let pos = self.container.lastCameraPosition
-                    let vr = Self.computeVisibleRegion(for: pos, viewportSize: self.container.viewportSize)
-                    let posWithVR = MapCameraPosition(
-                        position: pos.position,
-                        zoom: pos.zoom,
-                        bearing: pos.bearing,
-                        tilt: pos.tilt,
-                        paddings: pos.paddings,
-                        visibleRegion: vr
-                    )
-                    await self.strategyMarkerController?.onCameraChanged(mapCameraPosition: posWithVR)
-                }
-            }
-            syncStrategyMarkers(content.markerRenderingMarkers)
-        } else {
-            strategyMarkerSubscriptions.values.forEach { $0.cancel() }
-            strategyMarkerSubscriptions.removeAll()
-            strategyMarkerStatesById.removeAll()
-            strategyMarkerRenderer?.unbind()
-            strategyMarkerRenderer = nil
-            strategyMarkerController?.destroy()
-            strategyMarkerController = nil
-        }
-    }
-
-    private func syncStrategyMarkers(_ markers: [MarkerState]) {
-        guard let controller = strategyMarkerController else { return }
-        let newIds = Set(markers.map { $0.id })
-        let oldIds = Set(strategyMarkerStatesById.keys)
-        var shouldSyncList = newIds != oldIds
-
-        var newStatesById: [String: MarkerState] = [:]
-        for state in markers {
-            if let existing = strategyMarkerStatesById[state.id], existing !== state {
-                strategyMarkerSubscriptions[state.id]?.cancel()
-                strategyMarkerSubscriptions.removeValue(forKey: state.id)
-                shouldSyncList = true
-            }
-            newStatesById[state.id] = state
-        }
-        strategyMarkerStatesById = newStatesById
-
-        let removedIds = oldIds.subtracting(newIds)
-        for id in removedIds {
-            strategyMarkerSubscriptions[id]?.cancel()
-            strategyMarkerSubscriptions.removeValue(forKey: id)
-        }
-
-        if shouldSyncList {
-            Task { [weak self] in
-                guard let self else { return }
-                await controller.add(data: markers)
-            }
-        }
-        for state in markers { subscribeToStrategyMarker(state) }
-    }
-
-    private func subscribeToStrategyMarker(_ state: MarkerState) {
-        guard strategyMarkerSubscriptions[state.id] == nil else { return }
-        strategyMarkerSubscriptions[state.id] = state.asFlow()
-            .dropFirst()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self, self.strategyMarkerStatesById[state.id] != nil else { return }
-                Task { [weak self] in
-                    await self?.strategyMarkerController?.update(state: state)
-                }
-            }
-    }
-
     func updateContent(_ content: MapViewContent) async {
         guard let controller else {
             NSLog("[MapConductor][ArcGIS] updateContent skipped because controller is nil")
@@ -649,11 +560,21 @@ private final class ArcGISMapViewModel: ObservableObject {
         }
         NSLog("[MapConductor][ArcGIS] updateContent begin")
         controller.markerController.tilingOptions = content.markerTilingOptions
+        let pos = container.lastCameraPosition
+        let vr = Self.computeVisibleRegion(for: pos, viewportSize: container.viewportSize)
+        let posWithVR = MapCameraPosition(
+            position: pos.position,
+            zoom: pos.zoom,
+            bearing: pos.bearing,
+            tilt: pos.tilt,
+            paddings: pos.paddings,
+            visibleRegion: vr
+        )
         if content.markerRenderingStrategy != nil {
             await controller.markerController.syncMarkers([])
-            updateStrategyRendering(content)
+            strategyManager.update(content: content, initialCamera: posWithVR)
         } else {
-            updateStrategyRendering(content)
+            strategyManager.update(content: content, initialCamera: posWithVR)
             await controller.markerController.syncMarkers(content.markers)
         }
         NSLog("[MapConductor][ArcGIS] markers synced count=%d strategyMarkers=%d", content.markers.count, content.markerRenderingMarkers.count)
