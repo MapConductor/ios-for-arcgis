@@ -379,7 +379,10 @@ private final class ArcGISMapViewModel: ObservableObject {
             polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer, scene: container.scene),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: container.scene),
-            rasterLayerController: raster
+            rasterLayerController: raster,
+            strategyMarkerControllerProvider: { [weak self] in
+                self?.strategyManager.controller
+            }
         )
         self.controller = controller
         state.setController(controller)
