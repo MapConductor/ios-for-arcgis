@@ -413,12 +413,24 @@ private final class ArcGISMapViewModel: ObservableObject {
                 return MarkerIconMetrics(size: icon.size, anchor: icon.anchor, infoAnchor: icon.infoAnchor)
             }
         )
+
+        // Screen-space marker animation layer: shares the info-bubble
+        // container (inserted below the bubbles) and the same projection.
+        markerController.renderer.animationOverlay = MarkerAnimationOverlayCoordinator(
+            container: infoBubbleContainer,
+            project: { [weak self] point in
+                guard let proxy = self?.container.proxy?.proxy else { return nil }
+                return proxy.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))?.screenPoint
+            }
+        )
         NSLog("[MapConductor][ArcGIS] bind end")
     }
 
     func unbind(state: ArcGISMapViewState) {
         NSLog("[MapConductor][ArcGIS] unbind begin")
         dragState = .idle
+        controller?.markerController.renderer.animationOverlay?.unbind()
+        controller?.markerController.renderer.animationOverlay = nil
         state.setController(nil as ArcGISMapViewController?)
         state.setMapViewHolder(nil)
         controller = nil
