@@ -4,6 +4,7 @@ import Foundation
 import MapConductorCore
 import SwiftUI
 
+
 public struct ArcGISMapView: View {
     @ObservedObject private var state: ArcGISMapViewState
 
@@ -201,6 +202,12 @@ private extension MapViewContent {
             hasher.combine($0.state.position.latitude)
             hasher.combine($0.state.position.longitude)
         }
+        markerRenderingMarkers.forEach {
+            hasher.combine($0.id)
+            hasher.combine($0.position.latitude)
+            hasher.combine($0.position.longitude)
+        }
+        if markerRenderingStrategy != nil { hasher.combine(true) }
         polylines.forEach { hasher.combine($0.id) }
         polygons.forEach { hasher.combine($0.id) }
         circles.forEach { hasher.combine($0.id) }
@@ -254,6 +261,13 @@ private final class ArcGISMapViewModel: ObservableObject {
     private let cameraMoveEndDebounceSeconds = 0.18
 
     private var currentMarkerTileRasterLayer: RasterLayerState?
+
+    private lazy var strategyManager = StrategyMarkerManager<Graphic, ArcGISMarkerRenderer>(
+        makeRenderer: { [weak self] _ in
+            guard let self else { fatalError("self unavailable") }
+            return ArcGISMarkerRenderer(markerLayer: self.markerLayer, container: self.container)
+        }
+    )
 
     let infoBubbleContainer = PassthroughContainerView()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
@@ -365,7 +379,10 @@ private final class ArcGISMapViewModel: ObservableObject {
             polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer, scene: container.scene),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: container.scene),
-            rasterLayerController: raster
+            rasterLayerController: raster,
+            strategyMarkerControllerProvider: { [weak self] in
+                self?.strategyManager.controller
+            }
         )
         self.controller = controller
         state.setController(controller)
@@ -396,15 +413,28 @@ private final class ArcGISMapViewModel: ObservableObject {
                 return MarkerIconMetrics(size: icon.size, anchor: icon.anchor, infoAnchor: icon.infoAnchor)
             }
         )
+
+        // Screen-space marker animation layer: shares the info-bubble
+        // container (inserted below the bubbles) and the same projection.
+        markerController.renderer.animationOverlay = MarkerAnimationOverlayCoordinator(
+            container: infoBubbleContainer,
+            project: { [weak self] point in
+                guard let proxy = self?.container.proxy?.proxy else { return nil }
+                return proxy.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))?.screenPoint
+            }
+        )
         NSLog("[MapConductor][ArcGIS] bind end")
     }
 
     func unbind(state: ArcGISMapViewState) {
         NSLog("[MapConductor][ArcGIS] unbind begin")
         dragState = .idle
+        controller?.markerController.renderer.animationOverlay?.unbind()
+        controller?.markerController.renderer.animationOverlay = nil
         state.setController(nil as ArcGISMapViewController?)
         state.setMapViewHolder(nil)
         controller = nil
+        strategyManager.clear()
         infoBubbleCoordinator?.unbind()
         infoBubbleCoordinator = nil
         didBind = false
@@ -485,6 +515,9 @@ private final class ArcGISMapViewModel: ObservableObject {
                 visibleRegion: vr
             )
             self.controller?.notifyCameraMoveEnd(posWithVR)
+            Task { [weak self] in
+                await self?.strategyManager.onCameraChanged(posWithVR)
+            }
         }
         cameraMoveEndWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + cameraMoveEndDebounceSeconds, execute: workItem)
@@ -542,8 +575,24 @@ private final class ArcGISMapViewModel: ObservableObject {
         }
         NSLog("[MapConductor][ArcGIS] updateContent begin")
         controller.markerController.tilingOptions = content.markerTilingOptions
-        await controller.markerController.syncMarkers(content.markers)
-        NSLog("[MapConductor][ArcGIS] markers synced count=%d", content.markers.count)
+        let pos = container.lastCameraPosition
+        let vr = Self.computeVisibleRegion(for: pos, viewportSize: container.viewportSize)
+        let posWithVR = MapCameraPosition(
+            position: pos.position,
+            zoom: pos.zoom,
+            bearing: pos.bearing,
+            tilt: pos.tilt,
+            paddings: pos.paddings,
+            visibleRegion: vr
+        )
+        if content.markerRenderingStrategy != nil {
+            await controller.markerController.syncMarkers([])
+            strategyManager.update(content: content, initialCamera: posWithVR)
+        } else {
+            strategyManager.update(content: content, initialCamera: posWithVR)
+            await controller.markerController.syncMarkers(content.markers)
+        }
+        NSLog("[MapConductor][ArcGIS] markers synced count=%d strategyMarkers=%d", content.markers.count, content.markerRenderingMarkers.count)
         await controller.groundImageController.syncGroundImages(content.groundImages)
         NSLog("[MapConductor][ArcGIS] groundImages synced count=%d", content.groundImages.count)
         let tileLayer = currentMarkerTileRasterLayer.map { RasterLayer(state: $0) }

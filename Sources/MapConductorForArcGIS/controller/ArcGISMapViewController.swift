@@ -2,6 +2,12 @@ import ArcGIS
 import Foundation
 import MapConductorCore
 
+typealias ArcGISStrategyMarkerController = StrategyMarkerController<
+    Graphic,
+    AnyMarkerRenderingStrategy<Graphic>,
+    ArcGISMarkerRenderer
+>
+
 final class ArcGISMapViewController: MapViewControllerProtocol {
     let holder: AnyMapViewHolder
     let typedHolder: ArcGISMapViewHolder
@@ -13,6 +19,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     let circleController: ArcGISCircleOverlayController
     let groundImageController: ArcGISGroundImageController
     let rasterLayerController: ArcGISRasterLayerController
+    private let strategyMarkerControllerProvider: () -> ArcGISStrategyMarkerController?
 
     private var cameraMoveStartListener: OnCameraMoveHandler?
     private var cameraMoveListener: OnCameraMoveHandler?
@@ -29,7 +36,8 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         polygonController: ArcGISPolygonOverlayController,
         circleController: ArcGISCircleOverlayController,
         groundImageController: ArcGISGroundImageController,
-        rasterLayerController: ArcGISRasterLayerController
+        rasterLayerController: ArcGISRasterLayerController,
+        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil }
     ) {
         self.typedHolder = holder
         self.holder = AnyMapViewHolder(holder)
@@ -39,6 +47,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         self.circleController = circleController
         self.groundImageController = groundImageController
         self.rasterLayerController = rasterLayerController
+        self.strategyMarkerControllerProvider = strategyMarkerControllerProvider
     }
 
     func clearOverlays() async {
@@ -169,6 +178,16 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
             let dist = hypot(screenPoint.x - markerPoint.x, screenPoint.y - markerPoint.y)
             if dist < clickRadiusPt {
                 markerController.dispatchClick(state: markerEntity.state)
+                return true
+            }
+        }
+
+        if let strategyController = strategyMarkerControllerProvider(),
+           let markerEntity = strategyController.find(position: touchPosition),
+           let markerPoint = toScreenPoint(from: markerEntity.state.position) {
+            let dist = hypot(screenPoint.x - markerPoint.x, screenPoint.y - markerPoint.y)
+            if dist < clickRadiusPt {
+                strategyController.dispatchClick(markerEntity.state)
                 return true
             }
         }
