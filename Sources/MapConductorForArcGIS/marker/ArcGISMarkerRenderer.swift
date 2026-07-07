@@ -16,6 +16,11 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
     var animateStartListener: OnMarkerEventHandler?
     var animateEndListener: OnMarkerEventHandler?
 
+    /// When set, drop/bounce animations run on the screen-space overlay layer
+    /// (projection-independent: correct on tilted/rotated/globe views) and the
+    /// native graphic is hidden for the duration.
+    var animationOverlay: MarkerAnimationOverlayCoordinator?
+
     init(markerLayer: GraphicsOverlay, container: any ArcGISMapContext) {
         self.markerLayer = markerLayer
         self.container = container
@@ -89,6 +94,35 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
         duration: CFTimeInterval
     ) async {
         guard let graphic = entity.marker else { return }
+
+        // Preferred path: animate the marker image on the screen-space overlay.
+        // Projection-independent (3D SceneView / rotated headings stay correct)
+        // and needs none of the deferral/projection sanity checks below.
+        if let overlay = animationOverlay {
+            graphic.geometry = GeoPoint(
+                latitude: entity.state.position.latitude,
+                longitude: entity.state.position.longitude,
+                altitude: entity.state.position.altitude ?? 0
+            ).toArcGISPoint(spatialReference: SpatialReference.wgs84)
+            graphic.isVisible = false
+            animateStartListener?(entity.state)
+            let icon = (entity.state.icon ?? DefaultMarkerIcon()).toBitmapIcon()
+            let visibleAfter = entity.visible
+            overlay.start(MarkerAnimationOverlayEntry(
+                id: entity.state.id,
+                state: entity.state,
+                icon: icon,
+                animation: animation,
+                duration: duration,
+                onFinished: { [weak self] in
+                    graphic.isVisible = visibleAfter
+                    entity.state.animate(nil)
+                    self?.animateEndListener?(entity.state)
+                }
+            ))
+            return
+        }
+
         guard let container else {
             await deferAnimate(entity: entity)
             return
