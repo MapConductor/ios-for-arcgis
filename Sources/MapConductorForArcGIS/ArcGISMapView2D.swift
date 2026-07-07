@@ -149,9 +149,11 @@ private final class ArcGISMapView2DModel: ObservableObject {
     private let markerLayer = GraphicsOverlay()
     private let polylineLayer = GraphicsOverlay()
     private let polygonLayer = GraphicsOverlay()
+    private let hullPolygonLayer = GraphicsOverlay()
     private let circleLayer = GraphicsOverlay()
 
     private(set) var controller: ArcGISMapView2DController?
+    private var hullPolygonController: ArcGISPolygonOverlayController?
     private var didBind = false
 
     init(state: ArcGISMapViewState) {
@@ -165,7 +167,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
 
         self.container = ArcGISMapContainer2D(
             map: map,
-            graphicsOverlays: [circleLayer, polygonLayer, polylineLayer, markerLayer],
+            graphicsOverlays: [circleLayer, polygonLayer, hullPolygonLayer, polylineLayer, markerLayer],
             cameraPosition: state.cameraPosition
         )
     }
@@ -204,6 +206,10 @@ private final class ArcGISMapView2DModel: ObservableObject {
 
         let holder = ArcGISMapViewHolder2D(container: container)
         let raster = ArcGISRasterLayerController(map: container.map)
+        self.hullPolygonController = ArcGISPolygonOverlayController(
+            polygonLayer: hullPolygonLayer,
+            scene: nil
+        )
         let controller = ArcGISMapView2DController(
             holder: holder,
             markerController: ArcGISMarkerController(
@@ -232,6 +238,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
         state.setController(nil as ArcGISMapView2DController?)
         state.setMapViewHolder(nil)
         controller = nil
+        hullPolygonController = nil
         didBind = false
     }
 
@@ -247,6 +254,12 @@ private final class ArcGISMapView2DModel: ObservableObject {
         await controller.markerController.add(data: markers)
         await controller.polylineController.add(data: polylines)
         await controller.polygonController.add(data: polygons)
+        for handler in content.polygonSyncHandlers {
+            let hullController = hullPolygonController
+            handler.bindPolygonSync { [weak hullController] states in
+                await hullController?.add(data: states)
+            }
+        }
         await controller.circleController.add(data: circles)
         await controller.groundImageController.add(data: groundImages)
         await controller.rasterLayerController.add(data: rasterLayers)

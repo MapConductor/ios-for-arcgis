@@ -256,9 +256,11 @@ private final class ArcGISMapViewModel: ObservableObject {
     private let markerLayer = GraphicsOverlay()
     private let polylineLayer = GraphicsOverlay()
     private let polygonLayer = GraphicsOverlay()
+    private let hullPolygonLayer = GraphicsOverlay()
     private let circleLayer = GraphicsOverlay()
 
     private(set) var controller: ArcGISMapViewController?
+    private var hullPolygonController: ArcGISPolygonOverlayController?
     private var didBind = false
     private var dragState: MarkerDragState = .idle
 
@@ -309,11 +311,12 @@ private final class ArcGISMapViewModel: ObservableObject {
         markerLayer.sceneProperties.surfacePlacement = .relative
         polylineLayer.sceneProperties.surfacePlacement = .drapedBillboarded
         polygonLayer.sceneProperties.surfacePlacement = .drapedBillboarded
+        hullPolygonLayer.sceneProperties.surfacePlacement = .drapedBillboarded
         circleLayer.sceneProperties.surfacePlacement = .drapedFlat
 
         self.container = ArcGISSceneContainer(
             scene: scene,
-            graphicsOverlays: [circleLayer, polygonLayer, polylineLayer, markerLayer],
+            graphicsOverlays: [circleLayer, polygonLayer, hullPolygonLayer, polylineLayer, markerLayer],
             cameraPosition: state.cameraPosition,
             baseSurface: surface,
             elevationSources: elevationSources
@@ -369,6 +372,10 @@ private final class ArcGISMapViewModel: ObservableObject {
 
         let holder = ArcGISMapViewHolder(container: container)
         let raster = ArcGISRasterLayerController(scene: container.scene)
+        self.hullPolygonController = ArcGISPolygonOverlayController(
+            polygonLayer: hullPolygonLayer,
+            scene: container.scene
+        )
         let controller = ArcGISMapViewController(
             holder: holder,
             markerController: ArcGISMarkerController(
@@ -383,9 +390,6 @@ private final class ArcGISMapViewModel: ObservableObject {
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: container.scene),
             rasterLayerController: raster,
-            strategyMarkerControllerProvider: { [weak self] in
-                self?.strategyManager.controller
-            }
         )
         self.controller = controller
         state.setController(controller)
@@ -444,6 +448,7 @@ private final class ArcGISMapViewModel: ObservableObject {
         strategyMarkerRenderer = nil
         strategyMarkerController?.destroy()
         strategyMarkerController = nil
+        hullPolygonController = nil
         infoBubbleCoordinator?.unbind()
         infoBubbleCoordinator = nil
         didBind = false
@@ -683,6 +688,12 @@ private final class ArcGISMapViewModel: ObservableObject {
         await controller.polylineController.syncPolylines(content.polylines)
         NSLog("[MapConductor][ArcGIS] polylines synced count=%d", content.polylines.count)
         await controller.polygonController.syncPolygons(content.polygons)
+        for handler in content.polygonSyncHandlers {
+            let hullController = hullPolygonController
+            handler.bindPolygonSync { [weak hullController] states in
+                await hullController?.add(data: states)
+            }
+        }
         NSLog("[MapConductor][ArcGIS] polygons synced count=%d", content.polygons.count)
         syncInfoBubbles(content.infoBubbles)
         NSLog("[MapConductor][ArcGIS] infoBubbles synced count=%d", content.infoBubbles.count)
