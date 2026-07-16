@@ -21,6 +21,8 @@ public extension MapCameraPosition {
             viewportWidthPx: width,
             viewportHeightPx: height
         )
+        
+        NSLog("ArcGIS (in)position=\(position),(in)tilt=\(tilt), (out)target=\(targetPoint), (out)distance=\(distance), (out)cameraPitchOffset=\(tilt)")
         return calculateCameraForOrbitParameters(
             targetPoint: targetPoint,
             distance: distance,
@@ -52,16 +54,27 @@ public func calculateCameraForOrbitParameters(
     cameraHeadingOffset: Double,
     cameraPitchOffset: Double
 ) -> Camera {
-    let finalPitch = max(0, min(cameraPitchOffset, arcGISMaxPitch))
+    let finalHeading = (cameraHeadingOffset + 180).truncatingRemainder(dividingBy: 360)
+
+    if cameraPitchOffset < 0.0 {
+        return Camera(
+            latitude: targetPoint.y,
+            longitude: targetPoint.x,
+            altitude: distance,
+            heading: finalHeading,
+            pitch: min(abs(cameraPitchOffset), arcGISMaxPitch),
+            roll: 0
+        )
+    }
+
+    let finalPitch = min(cameraPitchOffset, arcGISMaxPitch)
     let pitchRad = finalPitch * .pi / 180
     let altitude = distance * cos(pitchRad)
-    let finalHeading = (cameraHeadingOffset + 180).truncatingRemainder(dividingBy: 360)
-    let horizontalDistance = distance * sin(pitchRad)
     let cameraCoordinates = calculateDestinationPoint(
         lat: targetPoint.y,
         lon: targetPoint.x,
         bearing: cameraHeadingOffset,
-        distance: horizontalDistance
+        distance: distance * sin(pitchRad)
     )
 
     return Camera(
@@ -79,15 +92,41 @@ public extension Camera {
         arcGISCameraConverter.altitudeToZoomLevel(altitude: location.z ?? 0, latitude: location.y, tilt: pitch)
     }
 
-    func toMapCameraPosition(visibleRegion: VisibleRegion? = nil, viewportSize: CGSize? = nil) -> MapCameraPosition {
+    func toMapCameraPosition(
+        logicalTiltHint: Double? = nil,
+        visibleRegion: VisibleRegion? = nil,
+        viewportSize: CGSize? = nil
+    ) -> MapCameraPosition {
         let altitude = location.z ?? 0
         let width = viewportSize.map { Int($0.width) }
         let height = viewportSize.map { Int($0.height) }
+        let logicalTilt = logicalTiltHint.map { $0 < 0.0 ? -abs(pitch) : pitch } ?? pitch
+        let tiltForZoom = logicalTilt < 0.0 ? 0.0 : pitch
+
+        // Camera.location is the eye, but MapCameraPosition.position is the target (the ground
+        // point at screen center). For positive tilt the orbit camera sits behind the target by
+        // distance * sin(pitch) — see calculateCameraForOrbitParameters — so shift forward along
+        // the view heading to recover the target; otherwise a set→read→set cycle teleports the
+        // target backward by that offset.
+        let target: GeoPoint
+        if logicalTilt >= 0.0, pitch > 0.01 {
+            let pitchRad = min(pitch, arcGISMaxPitch) * .pi / 180
+            let distance = altitude / max(cos(pitchRad), 0.05)
+            target = calculateDestinationPoint(
+                lat: location.y,
+                lon: location.x,
+                bearing: heading,
+                distance: distance * sin(pitchRad)
+            )
+        } else {
+            target = GeoPoint(latitude: location.y, longitude: location.x, altitude: 0)
+        }
+
         return MapCameraPosition(
-            position: GeoPoint(latitude: location.y, longitude: location.x, altitude: altitude),
-            zoom: arcGISCameraConverter.altitudeToZoomLevel(altitude: altitude, latitude: location.y, tilt: pitch, viewportWidthPx: width, viewportHeightPx: height),
+            position: GeoPoint(latitude: target.latitude, longitude: target.longitude, altitude: altitude),
+            zoom: arcGISCameraConverter.altitudeToZoomLevel(altitude: altitude, latitude: target.latitude, tilt: tiltForZoom, viewportWidthPx: width, viewportHeightPx: height),
             bearing: ((heading.truncatingRemainder(dividingBy: 360)) + 360).truncatingRemainder(dividingBy: 360),
-            tilt: pitch,
+            tilt: logicalTilt,
             visibleRegion: visibleRegion
         )
     }

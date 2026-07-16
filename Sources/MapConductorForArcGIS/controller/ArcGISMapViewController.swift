@@ -28,6 +28,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     private var mapLongClickListener: OnMapEventHandler?
     private var mapInitializedListener: OnMapInitializedHandler?
     private var mapDesignTypeChangeListener: ArcGISDesignTypeChangeHandler?
+    private(set) var lastLogicalTilt: Double?
 
     init(
         holder: ArcGISMapViewHolder,
@@ -88,6 +89,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     }
 
     func moveCamera(position: MapCameraPosition) {
+        lastLogicalTilt = position.tilt
         typedHolder.mapView.lastCameraPosition = position
         Task {
             let viewportSize = typedHolder.mapView.viewportSize
@@ -96,6 +98,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     }
 
     func animateCamera(position: MapCameraPosition, duration: Long) {
+        lastLogicalTilt = position.tilt
         typedHolder.mapView.lastCameraPosition = position
         Task {
             let viewportSize = typedHolder.mapView.viewportSize

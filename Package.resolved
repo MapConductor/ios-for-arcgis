@@ -8,15 +8,6 @@
         "revision" : "806abf58d8a28382b0c619c2014f924d428eacfe",
         "version" : "200.8.1"
       }
-    },
-    {
-      "identity" : "ios-sdk-core",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/MapConductor/ios-sdk-core",
-      "state" : {
-        "revision" : "1bc990d0b7656c6b2f103d1db0b9df08ec3e93f1",
-        "version" : "1.0.7"
-      }
     }
   ],
   "version" : 2

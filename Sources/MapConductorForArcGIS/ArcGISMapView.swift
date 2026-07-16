@@ -511,7 +511,10 @@ private final class ArcGISMapViewModel: ObservableObject {
     }
 
     func notifyCameraMove(camera: Camera) {
-        let position = camera.toMapCameraPosition(viewportSize: container.viewportSize)
+        let position = camera.toMapCameraPosition(
+            logicalTiltHint: controller?.lastLogicalTilt,
+            viewportSize: container.viewportSize
+        )
         container.lastCameraPosition = position
         controller?.notifyCameraMove(position)
 
