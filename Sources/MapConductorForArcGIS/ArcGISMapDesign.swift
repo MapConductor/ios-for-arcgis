@@ -11,10 +11,16 @@ public typealias ArcGISDesignTypeChangeHandler = (ArcGISMapDesignType) -> Void
 public struct ArcGISDesign: ArcGISMapDesignTypeProtocol, Hashable {
     public let id: String
     public let elevationSources: [String]
+    public let attributionRules: [AttributionRule]
 
-    public init(id: String, elevationSources: [String] = []) {
+    public init(
+        id: String,
+        elevationSources: [String] = [],
+        attributionRules: [AttributionRule] = []
+    ) {
         self.id = id
         self.elevationSources = elevationSources
+        self.attributionRules = attributionRules
     }
 
     public func getValue() -> String {
@@ -22,7 +28,7 @@ public struct ArcGISDesign: ArcGISMapDesignTypeProtocol, Hashable {
     }
 
     public func withElevationSources(_ sources: [String]) -> ArcGISDesign {
-        ArcGISDesign(id: id, elevationSources: sources)
+        ArcGISDesign(id: id, elevationSources: sources, attributionRules: attributionRules)
     }
 
     public static let Streets = ArcGISDesign(id: "arc_gis_streets")

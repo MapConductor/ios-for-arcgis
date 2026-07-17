@@ -190,6 +190,12 @@ private struct ArcGISMapViewBody: View {
                 content.views[index]
             }
 
+            MapAttributionOverlay(
+                designRules: state.mapDesignType.attributionRules,
+                rasterLayers: content.rasterLayers,
+                camera: state.cameraPosition
+            )
+
             if !state.uiSettings.scrollGesture {
                 Color.clear
                     .contentShape(Rectangle())

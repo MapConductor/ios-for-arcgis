@@ -89,8 +89,9 @@ private struct ArcGISMapView2DBody: View {
     }
 
     var body: some View {
-        MapViewReader { proxy in
-            MapView(
+        ZStack {
+            MapViewReader { proxy in
+                MapView(
                 map: model.container.map,
                 graphicsOverlays: model.container.graphicsOverlays
             )
@@ -126,6 +127,12 @@ private struct ArcGISMapView2DBody: View {
             .task(id: content.identityFingerprint) {
                 await model.updateContent(content)
             }
+            }
+            MapAttributionOverlay(
+                designRules: state.mapDesignType.attributionRules,
+                rasterLayers: content.rasterLayers,
+                camera: state.cameraPosition
+            )
         }
     }
 }
