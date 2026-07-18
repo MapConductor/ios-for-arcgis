@@ -161,17 +161,25 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
 
     func handleDragStart(screenPoint: CGPoint) -> Bool {
         guard let entity = draggableMarker(at: screenPoint) else { return false }
-        draggingMarkerId = entity.state.id
-        dispatchDragStart(state: entity.state)
-        onUpdateInfoBubble(entity.state.id)
+        return handleDragStart(markerId: entity.state.id)
+    }
+
+    func handleDragStart(markerId: String) -> Bool {
+        guard let state = markerManager.getEntity(markerId)?.state,
+              state.draggable else { return false }
+        draggingMarkerId = markerId
+        dispatchDragStart(state: state)
+        onUpdateInfoBubble(markerId)
         return true
     }
 
     func handleDrag(at position: GeoPoint) -> Bool {
         guard let markerId = draggingMarkerId,
-              let state = markerManager.getEntity(markerId)?.state else {
+              let entity = markerManager.getEntity(markerId) else {
             return false
         }
+        entity.marker?.geometry = position.toArcGISPoint(spatialReference: .wgs84)
+        let state = entity.state
         state.position = position
         dispatchDrag(state: state)
         onUpdateInfoBubble(markerId)
@@ -186,6 +194,7 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         }
         draggingMarkerId = nil
         if let position {
+            markerManager.getEntity(markerId)?.marker?.geometry = position.toArcGISPoint(spatialReference: .wgs84)
             state.position = position
         }
         dispatchDragEnd(state: state)

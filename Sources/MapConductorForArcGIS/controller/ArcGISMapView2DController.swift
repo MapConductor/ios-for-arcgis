@@ -149,13 +149,65 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         if let mapPoint {
             touchPosition = mapPoint.toGeoPoint()
         } else if let proxy = typedHolder.mapView.proxy?.proxy,
-                  let resolvedPoint = try? await proxy.location(fromScreenPoint: screenPoint) {
+                  let resolvedPoint = proxy.location(fromScreenPoint: screenPoint) {
             touchPosition = resolvedPoint.toGeoPoint()
         } else {
             touchPosition = nil
         }
         guard let touchPosition else { return }
         notifyMapLongClick(touchPosition)
+    }
+
+    @MainActor
+    func handleMarkerDragStart(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
+        if let proxy = typedHolder.mapView.proxy?.proxy,
+           let result = try? await proxy.identify(
+               on: markerController.renderer.markerLayer,
+               screenPoint: screenPoint,
+               tolerance: 12,
+               returnPopupsOnly: false,
+               maximumResults: nil
+           ) {
+            for graphic in result.graphics {
+                guard let markerId = graphic.attributeValue(forKey: "id") as? String else { continue }
+                if markerController.handleDragStart(markerId: markerId) {
+                    return true
+                }
+            }
+        }
+        return markerController.handleDragStart(screenPoint: screenPoint)
+    }
+
+    @MainActor
+    func handleMarkerDrag(screenPoint: CGPoint) async -> Bool {
+        guard let touchPosition = await toGeoPoint(from: screenPoint) else { return false }
+        return markerController.handleDrag(at: touchPosition)
+    }
+
+    @MainActor
+    func handleMarkerDrag(mapPoint: Point) -> Bool {
+        markerController.handleDrag(at: mapPoint.toGeoPoint())
+    }
+
+    @MainActor
+    func handleMarkerDragEnd(screenPoint: CGPoint) async -> Bool {
+        let touchPosition = await toGeoPoint(from: screenPoint)
+        return markerController.handleDragEnd(at: touchPosition)
+    }
+
+    @MainActor
+    func handleMarkerDragEnd(mapPoint: Point) -> Bool {
+        markerController.handleDragEnd(at: mapPoint.toGeoPoint())
+    }
+
+    @MainActor
+    func cancelMarkerDrag() -> Bool {
+        markerController.cancelDrag()
+    }
+
+    @MainActor
+    func finishMarkerDrag() -> Bool {
+        markerController.handleDragEnd(at: nil)
     }
 
     private func toViewpoint(_ position: MapCameraPosition) -> Viewpoint {
@@ -167,6 +219,15 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     @MainActor
     private func toScreenPoint(from geoPoint: GeoPoint) -> CGPoint? {
         typedHolder.mapView.proxy?.proxy.screenPoint(fromLocation: geoPoint.toArcGISPoint())
+    }
+
+    @MainActor
+    private func toGeoPoint(from screenPoint: CGPoint) async -> GeoPoint? {
+        guard let proxy = typedHolder.mapView.proxy?.proxy,
+              let point = proxy.location(fromScreenPoint: screenPoint) else {
+            return nil
+        }
+        return point.toGeoPoint()
     }
 
     static func zoomToScale(_ zoom: Double, latitude: Double) -> Double {

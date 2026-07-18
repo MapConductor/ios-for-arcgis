@@ -8,8 +8,8 @@ final class ArcGISPolygonOverlayController: PolygonController<Graphic, ArcGISPol
     private var statesById: [String: PolygonState] = [:]
     private var subscriptions: [String: AnyCancellable] = [:]
 
-    init(polygonLayer: GraphicsOverlay, scene: ArcGIS.Scene?) {
-        super.init(polygonManager: PolygonManager<Graphic>(), renderer: ArcGISPolygonOverlayRenderer(polygonLayer: polygonLayer, scene: scene))
+    init(polygonLayer: GraphicsOverlay) {
+        super.init(polygonManager: PolygonManager<Graphic>(), renderer: ArcGISPolygonOverlayRenderer(polygonLayer: polygonLayer))
     }
 
     func syncPolygons(_ polygons: [MapConductorCore.Polygon]) async {

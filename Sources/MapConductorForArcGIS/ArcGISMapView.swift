@@ -379,8 +379,7 @@ private final class ArcGISMapViewModel: ObservableObject {
         let holder = ArcGISMapViewHolder(container: container)
         let raster = ArcGISRasterLayerController(scene: container.scene)
         self.hullPolygonController = ArcGISPolygonOverlayController(
-            polygonLayer: hullPolygonLayer,
-            scene: container.scene
+            polygonLayer: hullPolygonLayer
         )
         let controller = ArcGISMapViewController(
             holder: holder,
@@ -392,7 +391,7 @@ private final class ArcGISMapViewModel: ObservableObject {
                 }
             ),
             polylineController: ArcGISPolylineOverlayController(polylineLayer: polylineLayer),
-            polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer, scene: container.scene),
+            polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: container.scene),
             rasterLayerController: raster,

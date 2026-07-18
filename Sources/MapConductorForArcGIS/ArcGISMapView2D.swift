@@ -105,8 +105,27 @@ private struct ArcGISMapView2DBody: View {
                     await model.controller?.handleLongPress(screenPoint: screenPoint, mapPoint: mapPoint)
                 }
             }
+            .onDragGesture(
+                shouldBegin: { screenPoint, mapPoint in
+                    await model.handleDragShouldBegin(screenPoint: screenPoint, mapPoint: mapPoint)
+                },
+                onChanged: { screenPoint, mapPoint in
+                    model.handleDragChanged(screenPoint: screenPoint, mapPoint: mapPoint)
+                },
+                onEnded: { screenPoint, mapPoint in
+                    model.handleDragEnded(screenPoint: screenPoint, mapPoint: mapPoint)
+                },
+                onCancelled: {
+                    model.handleDragCancelled()
+                }
+            )
             .onViewpointChanged(kind: .centerAndScale) { viewpoint in
                 model.updateViewpoint(viewpoint)
+            }
+            .onInteractingChanged { isInteracting in
+                if !isInteracting {
+                    model.handleDragInteractionEnded()
+                }
             }
             .onAppear {
                 model.attach(proxy: proxy)
@@ -162,6 +181,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
     private(set) var controller: ArcGISMapView2DController?
     private var hullPolygonController: ArcGISPolygonOverlayController?
     private var didBind = false
+    private var dragState: MarkerDragState2D = .idle
 
     init(state: ArcGISMapViewState) {
         let map = ArcGIS.Map(basemapStyle: ArcGISDesign.toBasemapStyle(state.mapDesignType))
@@ -214,8 +234,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
         let holder = ArcGISMapViewHolder2D(container: container)
         let raster = ArcGISRasterLayerController(map: container.map)
         self.hullPolygonController = ArcGISPolygonOverlayController(
-            polygonLayer: hullPolygonLayer,
-            scene: nil
+            polygonLayer: hullPolygonLayer
         )
         let controller = ArcGISMapView2DController(
             holder: holder,
@@ -225,7 +244,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
                 onUpdateInfoBubble: { _ in }
             ),
             polylineController: ArcGISPolylineOverlayController(polylineLayer: polylineLayer),
-            polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer, scene: nil),
+            polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: nil),
             rasterLayerController: raster
@@ -242,11 +261,58 @@ private final class ArcGISMapView2DModel: ObservableObject {
     }
 
     func unbind(state: ArcGISMapViewState) {
+        dragState = .idle
         state.setController(nil as ArcGISMapView2DController?)
         state.setMapViewHolder(nil)
         controller = nil
         hullPolygonController = nil
         didBind = false
+    }
+
+    func handleDragShouldBegin(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
+        guard let controller else { return false }
+        let didStart = await controller.handleMarkerDragStart(screenPoint: screenPoint, mapPoint: mapPoint)
+        dragState = didStart ? .dragging : .idle
+        return didStart
+    }
+
+    func handleDragChanged(screenPoint: CGPoint, mapPoint: Point?) {
+        guard let controller, dragState == .dragging else { return }
+        if let mapPoint {
+            _ = controller.handleMarkerDrag(mapPoint: mapPoint)
+        } else {
+            Task { [weak controller] in
+                _ = await controller?.handleMarkerDrag(screenPoint: screenPoint)
+            }
+        }
+    }
+
+    func handleDragEnded(screenPoint: CGPoint, mapPoint: Point?) {
+        guard let controller else {
+            dragState = .idle
+            return
+        }
+        if dragState == .dragging {
+            if let mapPoint {
+                _ = controller.handleMarkerDragEnd(mapPoint: mapPoint)
+            } else {
+                Task { [weak controller] in
+                    _ = await controller?.handleMarkerDragEnd(screenPoint: screenPoint)
+                }
+            }
+        }
+        dragState = .idle
+    }
+
+    func handleDragCancelled() {
+        _ = controller?.cancelMarkerDrag()
+        dragState = .idle
+    }
+
+    func handleDragInteractionEnded() {
+        guard dragState == .dragging else { return }
+        _ = controller?.finishMarkerDrag()
+        dragState = .idle
     }
 
     func updateContent(_ content: MapViewContent) async {
@@ -271,6 +337,11 @@ private final class ArcGISMapView2DModel: ObservableObject {
         await controller.groundImageController.add(data: groundImages)
         await controller.rasterLayerController.add(data: rasterLayers)
     }
+}
+
+private enum MarkerDragState2D {
+    case idle
+    case dragging
 }
 
 @MainActor

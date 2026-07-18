@@ -234,7 +234,22 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
 
     @MainActor
     func handleMarkerDragStart(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
-        markerController.handleDragStart(screenPoint: screenPoint)
+        if let proxy = typedHolder.mapView.proxy?.proxy,
+           let result = try? await proxy.identify(
+               on: markerController.renderer.markerLayer,
+               screenPoint: screenPoint,
+               tolerance: 12,
+               returnPopupsOnly: false,
+               maximumResults: nil
+           ) {
+            for graphic in result.graphics {
+                guard let markerId = graphic.attributeValue(forKey: "id") as? String else { continue }
+                if markerController.handleDragStart(markerId: markerId) {
+                    return true
+                }
+            }
+        }
+        return markerController.handleDragStart(screenPoint: screenPoint)
     }
 
     @MainActor
