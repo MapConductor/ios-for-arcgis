@@ -1,3 +1,7 @@
 .build/
 .swiftpm
 .build
+
+# Vendored CocoaPods binaries (ArcGIS.xcframework, CoreArcGIS.xcframework) - downloaded from
+# Esri's CDN by scripts/fetch-arcgis-xcframeworks.sh, not committed (~578MB combined).
+Frameworks/

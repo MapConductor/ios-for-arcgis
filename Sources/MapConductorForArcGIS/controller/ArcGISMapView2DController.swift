@@ -231,13 +231,13 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     }
 
     static func zoomToScale(_ zoom: Double, latitude: Double) -> Double {
-        let resolution = 2.0 * .pi * 6378137.0 * cos(.pi * latitude / 180.0) / (256.0 * pow(2.0, zoom))
+        let resolution = Earth.circumferenceMeters * cos(.pi * latitude / 180.0) / (256.0 * pow(2.0, zoom))
         return resolution * 96.0 * 39.37
     }
 
     static func scaleToZoom(_ scale: Double, latitude: Double) -> Double {
         let resolution = scale / (96.0 * 39.37)
-        let numerator = 2.0 * .pi * 6378137.0 * cos(.pi * latitude / 180.0)
+        let numerator = Earth.circumferenceMeters * cos(.pi * latitude / 180.0)
         return log2(numerator / (256.0 * resolution))
     }
 }
