@@ -4,7 +4,7 @@ import MapConductorCore
 
 final class ArcGISMapView2DController: MapViewControllerProtocol {
     let holder: AnyMapViewHolder
-    let typedHolder: ArcGISMapViewHolder2D
+    let typedHolder: ArcGISMapView2DHolder
     let coroutine = CoroutineScope()
 
     let markerController: ArcGISMarkerController
@@ -23,7 +23,7 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     private var mapDesignTypeChangeListener: ArcGISDesignTypeChangeHandler?
 
     init(
-        holder: ArcGISMapViewHolder2D,
+        holder: ArcGISMapView2DHolder,
         markerController: ArcGISMarkerController,
         polylineController: ArcGISPolylineOverlayController,
         polygonController: ArcGISPolygonOverlayController,

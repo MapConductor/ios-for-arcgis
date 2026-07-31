@@ -3,9 +3,9 @@ import CoreGraphics
 import MapConductorCore
 import Foundation
 
-final class ArcGISSceneContainer {
-    let scene: ArcGIS.Scene
-    let graphicsOverlays: [GraphicsOverlay]
+public final class ArcGISSceneContainer {
+    public let scene: ArcGIS.Scene
+    public let graphicsOverlays: [GraphicsOverlay]
     var proxy: SceneViewProxyBox?
     var lastCameraPosition: MapCameraPosition
     var viewportSize: CGSize?
@@ -38,9 +38,9 @@ final class SceneViewProxyBox {
 
 // MARK: - 2D (MapView) container and holder
 
-final class ArcGISMapContainer2D {
-    let map: ArcGIS.Map
-    let graphicsOverlays: [GraphicsOverlay]
+public final class ArcGISMapContainer2D {
+    public let map: ArcGIS.Map
+    public let graphicsOverlays: [GraphicsOverlay]
     var proxy: MapViewProxyBox?
     var lastCameraPosition: MapCameraPosition
     var viewportSize: CGSize?
@@ -64,54 +64,54 @@ final class MapViewProxyBox {
     }
 }
 
-final class ArcGISMapViewHolder2D: MapViewHolderProtocol {
-    let mapView: ArcGISMapContainer2D
-    let map: ArcGIS.Map
+public final class ArcGISMapView2DHolder: MapViewHolderProtocol {
+    public let mapView: ArcGISMapContainer2D
+    public let map: ArcGIS.Map
 
     init(container: ArcGISMapContainer2D) {
         self.mapView = container
         self.map = container.map
     }
 
-    func toScreenOffset(position: GeoPointProtocol) -> CGPoint? {
+    public func toScreenOffset(position: GeoPointProtocol) -> CGPoint? {
         guard let proxy = mapView.proxy?.proxy else { return nil }
         let point = position.toArcGISPoint(spatialReference: .wgs84)
         return proxy.screenPoint(fromLocation: point)
     }
 
-    func fromScreenOffset(offset: CGPoint) async -> GeoPoint? {
+    public func fromScreenOffset(offset: CGPoint) async -> GeoPoint? {
         guard let point = try? await mapView.proxy?.proxy.location(fromScreenPoint: offset) else { return nil }
         return point.toGeoPoint()
     }
 
-    func fromScreenOffsetSync(offset: CGPoint) -> GeoPoint? {
+    public func fromScreenOffsetSync(offset: CGPoint) -> GeoPoint? {
         nil
     }
 }
 
 // MARK: - 3D (SceneView) holder
 
-final class ArcGISMapViewHolder: MapViewHolderProtocol {
-    let mapView: ArcGISSceneContainer
-    let map: ArcGIS.Scene
+public final class ArcGISMapViewHolder: MapViewHolderProtocol {
+    public let mapView: ArcGISSceneContainer
+    public let map: ArcGIS.Scene
 
     init(container: ArcGISSceneContainer) {
         self.mapView = container
         self.map = container.scene
     }
 
-    func toScreenOffset(position: GeoPointProtocol) -> CGPoint? {
+    public func toScreenOffset(position: GeoPointProtocol) -> CGPoint? {
         guard let proxy = mapView.proxy?.proxy else { return nil }
         let point = position.toArcGISPoint(spatialReference: .wgs84)
         return proxy.screenPoint(fromLocation: point)?.screenPoint
     }
 
-    func fromScreenOffset(offset: CGPoint) async -> GeoPoint? {
+    public func fromScreenOffset(offset: CGPoint) async -> GeoPoint? {
         guard let point = try? await mapView.proxy?.proxy.location(fromScreenPoint: offset) else { return nil }
         return point.toGeoPoint()
     }
 
-    func fromScreenOffsetSync(offset: CGPoint) -> GeoPoint? {
+    public func fromScreenOffsetSync(offset: CGPoint) -> GeoPoint? {
         nil
     }
 }

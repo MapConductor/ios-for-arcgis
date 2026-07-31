@@ -10,7 +10,12 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
     @Published private var _uiSettings: MapUISettings
 
     private var controller: ArcGISMapViewController?
-    private var mapViewHolder: AnyMapViewHolder?
+
+    /// Provider-typed holder while the 3D `ArcGISMapView` (SceneView) is attached; nil in 2D mode.
+    public private(set) var sceneViewHolder: ArcGISMapViewHolder?
+
+    /// Provider-typed holder while the 2D `ArcGISMapView2D` (MapView) is attached; nil in 3D mode.
+    public private(set) var mapView2DHolder: ArcGISMapView2DHolder?
 
     public override var id: String { stateId }
     public override var cameraPosition: MapCameraPosition { _cameraPosition }
@@ -71,7 +76,9 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
     }
 
     public override func getMapViewHolder() -> AnyMapViewHolder? {
-        mapViewHolder
+        if let sceneViewHolder { return AnyMapViewHolder(sceneViewHolder) }
+        if let mapView2DHolder { return AnyMapViewHolder(mapView2DHolder) }
+        return nil
     }
 
     func setController(_ controller: ArcGISMapViewController?) {
@@ -94,8 +101,12 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
         _mapDesignType = value
     }
 
-    func setMapViewHolder(_ holder: AnyMapViewHolder?) {
-        mapViewHolder = holder
+    func setSceneViewHolder(_ holder: ArcGISMapViewHolder?) {
+        sceneViewHolder = holder
+    }
+
+    func setMapView2DHolder(_ holder: ArcGISMapView2DHolder?) {
+        mapView2DHolder = holder
     }
 
     func updateCameraPosition(_ cameraPosition: MapCameraPosition) {

@@ -12,14 +12,7 @@ private typealias ArcGISStrategyController = StrategyMarkerController<
 
 public struct ArcGISMapView: View {
     @ObservedObject private var state: ArcGISMapViewState
-
-    private let onMapLoaded: OnMapLoadedHandler<ArcGISMapViewState>?
-    private let onMapClick: OnMapEventHandler?
-    private let onMapLongClick: OnMapEventHandler?
-    private let onCameraMoveStart: OnCameraMoveHandler?
-    private let onCameraMove: OnCameraMoveHandler?
-    private let onCameraMoveEnd: OnCameraMoveHandler?
-    private let sdkInitialize: (() -> Void)?
+    private let handlers: MapViewHandlers<ArcGISMapViewState>
     private let content: () -> MapViewContent
 
     public init(
@@ -34,13 +27,15 @@ public struct ArcGISMapView: View {
         @MapViewContentBuilder content: @escaping () -> MapViewContent = { MapViewContent() }
     ) {
         self.state = state
-        self.onMapLoaded = onMapLoaded
-        self.onMapClick = onMapClick
-        self.onMapLongClick = onMapLongClick
-        self.onCameraMoveStart = onCameraMoveStart
-        self.onCameraMove = onCameraMove
-        self.onCameraMoveEnd = onCameraMoveEnd
-        self.sdkInitialize = sdkInitialize
+        self.handlers = MapViewHandlers(
+            onMapLoaded: onMapLoaded,
+            onMapClick: onMapClick,
+            onMapLongClick: onMapLongClick,
+            onCameraMoveStart: onCameraMoveStart,
+            onCameraMove: onCameraMove,
+            onCameraMoveEnd: onCameraMoveEnd,
+            sdkInitialize: sdkInitialize
+        )
         self.content = content
     }
 
@@ -48,13 +43,7 @@ public struct ArcGISMapView: View {
         let mapContent = content()
         ArcGISMapViewBody(
             state: state,
-            onMapLoaded: onMapLoaded,
-            onMapClick: onMapClick,
-            onMapLongClick: onMapLongClick,
-            onCameraMoveStart: onCameraMoveStart,
-            onCameraMove: onCameraMove,
-            onCameraMoveEnd: onCameraMoveEnd,
-            sdkInitialize: sdkInitialize,
+            handlers: handlers,
             content: mapContent
         )
     }
@@ -63,43 +52,29 @@ public struct ArcGISMapView: View {
 private struct ArcGISMapViewBody: View {
     @ObservedObject var state: ArcGISMapViewState
 
-    let onMapLoaded: OnMapLoadedHandler<ArcGISMapViewState>?
-    let onMapClick: OnMapEventHandler?
-    let onMapLongClick: OnMapEventHandler?
-    let onCameraMoveStart: OnCameraMoveHandler?
-    let onCameraMove: OnCameraMoveHandler?
-    let onCameraMoveEnd: OnCameraMoveHandler?
-    let sdkInitialize: (() -> Void)?
+    let handlers: MapViewHandlers<ArcGISMapViewState>
     let content: MapViewContent
 
     @StateObject private var model: ArcGISMapViewModel
 
     init(
         state: ArcGISMapViewState,
-        onMapLoaded: OnMapLoadedHandler<ArcGISMapViewState>?,
-        onMapClick: OnMapEventHandler?,
-        onMapLongClick: OnMapEventHandler?,
-        onCameraMoveStart: OnCameraMoveHandler?,
-        onCameraMove: OnCameraMoveHandler?,
-        onCameraMoveEnd: OnCameraMoveHandler?,
-        sdkInitialize: (() -> Void)?,
+        handlers: MapViewHandlers<ArcGISMapViewState>,
         content: MapViewContent
     ) {
         self.state = state
-        self.onMapLoaded = onMapLoaded
-        self.onMapClick = onMapClick
-        self.onMapLongClick = onMapLongClick
-        self.onCameraMoveStart = onCameraMoveStart
-        self.onCameraMove = onCameraMove
-        self.onCameraMoveEnd = onCameraMoveEnd
-        self.sdkInitialize = sdkInitialize
+        self.handlers = handlers
         self.content = content
-        ArcGISSdkInitialization.runOnce(sdkInitialize)
+        ArcGISSdkInitialization.runOnce(handlers.sdkInitialize)
         _model = StateObject(wrappedValue: ArcGISMapViewModel(state: state))
     }
 
     var body: some View {
-        ZStack {
+        MapViewBase(
+            attributionRules: state.mapDesignType.attributionRules,
+            camera: state.cameraPosition,
+            content: content
+        ) {
             SceneViewReader { proxy in
                 SceneView(scene: model.container.scene, graphicsOverlays: model.container.graphicsOverlays)
                     .onSingleTapGesture { screenPoint, mapPoint in
@@ -149,15 +124,15 @@ private struct ArcGISMapViewBody: View {
                         NSLog("[MapConductor][ArcGIS] proxy attached")
                         model.bind(
                             state: state,
-                            onMapClick: onMapClick,
-                            onMapLongClick: onMapLongClick,
-                            onCameraMoveStart: onCameraMoveStart,
-                            onCameraMove: onCameraMove,
-                            onCameraMoveEnd: onCameraMoveEnd
+                            onMapClick: handlers.onMapClick,
+                            onMapLongClick: handlers.onMapLongClick,
+                            onCameraMoveStart: handlers.onCameraMoveStart,
+                            onCameraMove: handlers.onCameraMove,
+                            onCameraMoveEnd: handlers.onCameraMoveEnd
                         )
                         NSLog("[MapConductor][ArcGIS] model bound")
                         model.controller?.notifyMapInitialized()
-                        onMapLoaded?(state)
+                        handlers.onMapLoaded?(state)
                         NSLog("[MapConductor][ArcGIS] SceneView onAppear end")
                     }
                     .onDisappear {
@@ -185,17 +160,7 @@ private struct ArcGISMapViewBody: View {
             }
 
             InfoBubbleContainerRepresentable(container: model.infoBubbleContainer)
-
-            ForEach(0..<content.views.count, id: \.self) { index in
-                content.views[index]
-            }
-
-            MapAttributionOverlay(
-                designRules: state.mapDesignType.attributionRules,
-                rasterLayers: content.rasterLayers,
-                camera: state.cameraPosition
-            )
-
+        } topContent: {
             if !state.uiSettings.scrollGesture {
                 Color.clear
                     .contentShape(Rectangle())
@@ -267,6 +232,7 @@ private final class ArcGISMapViewModel: ObservableObject {
 
     private(set) var controller: ArcGISMapViewController?
     private var hullPolygonController: ArcGISPolygonOverlayController?
+    private var overlayScope: MapOverlayScope?
     private var didBind = false
     private var dragState: MarkerDragState = .idle
 
@@ -397,8 +363,17 @@ private final class ArcGISMapViewModel: ObservableObject {
             rasterLayerController: raster,
         )
         self.controller = controller
+
+        let overlayScope = MapOverlayScope()
+        self.overlayScope = overlayScope
+        bindOverlayCollector(overlayScope.circleCollector, to: controller.circleController)
+        bindOverlayCollector(overlayScope.polylineCollector, to: controller.polylineController)
+        bindOverlayCollector(overlayScope.polygonCollector, to: controller.polygonController)
+        bindOverlayCollector(overlayScope.rasterLayerCollector, to: controller.rasterLayerController)
+        bindOverlayCollector(overlayScope.groundImageCollector, to: controller.groundImageController)
+
         state.setController(controller)
-        state.setMapViewHolder(controller.holder)
+        state.setSceneViewHolder(controller.typedHolder)
         controller.setMapClickListener(listener: onMapClick)
         controller.setMapLongClickListener(listener: onMapLongClick)
         controller.setCameraMoveStartListener(listener: onCameraMoveStart)
@@ -444,7 +419,7 @@ private final class ArcGISMapViewModel: ObservableObject {
         controller?.markerController.renderer.animationOverlay?.unbind()
         controller?.markerController.renderer.animationOverlay = nil
         state.setController(nil as ArcGISMapViewController?)
-        state.setMapViewHolder(nil)
+        state.setSceneViewHolder(nil)
         controller = nil
         strategyMarkerSubscriptions.values.forEach { $0.cancel() }
         strategyMarkerSubscriptions.removeAll()
@@ -456,6 +431,8 @@ private final class ArcGISMapViewModel: ObservableObject {
         hullPolygonController = nil
         infoBubbleCoordinator?.unbind()
         infoBubbleCoordinator = nil
+        overlayScope?.clear()
+        overlayScope = nil
         didBind = false
         NSLog("[MapConductor][ArcGIS] unbind end")
     }
@@ -650,7 +627,7 @@ private final class ArcGISMapViewModel: ObservableObject {
 
         if shouldSyncList {
             Task { [weak self] in
-                guard let self else { return }
+                guard self != nil else { return }
                 await controller.add(data: markers)
             }
         }
@@ -675,7 +652,6 @@ private final class ArcGISMapViewModel: ObservableObject {
             NSLog("[MapConductor][ArcGIS] updateContent skipped because controller is nil")
             return
         }
-        NSLog("[MapConductor][ArcGIS] updateContent begin")
         controller.markerController.tilingOptions = content.markerTilingOptions
         if content.markerRenderingStrategy != nil {
             await controller.markerController.syncMarkers([])
@@ -684,28 +660,20 @@ private final class ArcGISMapViewModel: ObservableObject {
             updateStrategyRendering(content)
             await controller.markerController.syncMarkers(content.markers)
         }
-        NSLog("[MapConductor][ArcGIS] markers synced count=%d strategyMarkers=%d", content.markers.count, content.markerRenderingMarkers.count)
-        await controller.groundImageController.syncGroundImages(content.groundImages)
-        NSLog("[MapConductor][ArcGIS] groundImages synced count=%d", content.groundImages.count)
+        overlayScope?.groundImageCollector.sync(content.groundImages.map { $0.state })
         let tileLayer = currentMarkerTileRasterLayer.map { RasterLayer(state: $0) }
         let allRasterLayers = content.rasterLayers + (tileLayer.map { [$0] } ?? [])
-        await controller.rasterLayerController.syncRasterLayers(allRasterLayers)
-        NSLog("[MapConductor][ArcGIS] rasterLayers synced count=%d (markerTile=%d)", allRasterLayers.count, tileLayer != nil ? 1 : 0)
-        await controller.circleController.syncCircles(content.circles)
-        NSLog("[MapConductor][ArcGIS] circles synced count=%d", content.circles.count)
-        await controller.polylineController.syncPolylines(content.polylines)
-        NSLog("[MapConductor][ArcGIS] polylines synced count=%d", content.polylines.count)
-        await controller.polygonController.syncPolygons(content.polygons)
+        overlayScope?.rasterLayerCollector.sync(allRasterLayers.map { $0.state })
+        overlayScope?.circleCollector.sync(content.circles.map { $0.state })
+        overlayScope?.polylineCollector.sync(content.polylines.map { $0.state })
+        overlayScope?.polygonCollector.sync(content.polygons.map { $0.state })
         for handler in content.polygonSyncHandlers {
             let hullController = hullPolygonController
             handler.bindPolygonSync { [weak hullController] states in
                 await hullController?.add(data: states)
             }
         }
-        NSLog("[MapConductor][ArcGIS] polygons synced count=%d", content.polygons.count)
         syncInfoBubbles(content.infoBubbles)
-        NSLog("[MapConductor][ArcGIS] infoBubbles synced count=%d", content.infoBubbles.count)
-        NSLog("[MapConductor][ArcGIS] updateContent end")
     }
 }
 
