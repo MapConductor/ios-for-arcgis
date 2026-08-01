@@ -1,6 +1,7 @@
 import ArcGIS
 import MapConductorCore
 
+@MainActor
 final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graphic> {
     let polylineLayer: GraphicsOverlay
 
@@ -38,16 +39,29 @@ final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graph
     }
 
     override func onPostProcess() async {
-        let sorted = polylineLayer.graphics.sorted {
+        // 整列済みなら no-op（頂点ドラッグ等の高頻度 update で removeAllGraphics → 再追加による
+        // ちらつきを避ける。android-for-arcgis と同じガード）。
+        let graphics = Array(polylineLayer.graphics)
+        guard graphics.count > 1 else { return }
+        let sorted = graphics.sorted {
             (($0.attributeValue(forKey: "zIndex") as? Int) ?? 0) < (($1.attributeValue(forKey: "zIndex") as? Int) ?? 0)
+        }
+        if zip(graphics, sorted).allSatisfy({ $0 === $1 }) {
+            return
         }
         polylineLayer.removeAllGraphics()
         sorted.forEach { polylineLayer.addGraphic($0) }
     }
 
     private func makeGeometry(_ state: PolylineState) -> Geometry {
-        Polyline(
-            points: state.points.map { $0.toArcGISPoint(spatialReference: .wgs84) },
+        // 他プロバイダと同様、測地線・直線ともコアの共通補間で頂点列を生成し、ArcGIS には
+        // 密な頂点列をそのまま渡す。生の頂点だと ArcGIS が辺を測地線として描くため、
+        // 非 geodesic の直線が geodesic と同一形状になってしまう（android-sdk と同じ対応）。
+        let points = state.geodesic
+            ? createInterpolatePoints(state.points)
+            : createLinearInterpolatePoints(state.points)
+        return Polyline(
+            points: points.map { $0.toArcGISPoint(spatialReference: .wgs84) },
             spatialReference: .wgs84
         )
     }

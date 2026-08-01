@@ -74,8 +74,16 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
     }
 
     func onPostProcess() async {
-        let sorted = markerLayer.graphics.sorted {
+        // zIndex 順の並べ替えが不要なら何もしない。マーカードラッグ中は update →
+        // onPostProcess が毎フレーム走るため、無条件に removeAllGraphics → 再追加すると
+        // 全マーカーがちらつく（android-for-arcgis と同じ「整列済みなら no-op」ガード）。
+        let graphics = Array(markerLayer.graphics)
+        guard graphics.count > 1 else { return }
+        let sorted = graphics.sorted {
             (($0.attributeValue(forKey: "zIndex") as? Int) ?? 0) < (($1.attributeValue(forKey: "zIndex") as? Int) ?? 0)
+        }
+        if zip(graphics, sorted).allSatisfy({ $0 === $1 }) {
+            return
         }
         markerLayer.removeAllGraphics()
         sorted.forEach { markerLayer.addGraphic($0) }

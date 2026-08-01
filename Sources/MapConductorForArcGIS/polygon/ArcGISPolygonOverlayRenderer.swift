@@ -1,6 +1,10 @@
 import ArcGIS
+import Foundation
 import MapConductorCore
 
+// ArcGIS の Graphic / GraphicsOverlay 変更は他レンダラ（marker など）と同様に MainActor 上で
+// 行う。nonisolated async のままだと global executor 上で走り、SceneView への反映が不安定になる。
+@MainActor
 final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic> {
     let polygonLayer: GraphicsOverlay
 
@@ -64,8 +68,10 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
     // MARK: - Geometry / Symbol helpers
 
     private func makeGeometry(_ state: PolygonState) -> Geometry {
-        let outer = ensureClockwiseRing(openRing(state.points))
-        let holes = state.holes.map { ensureCounterClockwise(openRing($0)) }
+        let outer = ensureClockwiseRing(openRing(toRing(state.points, geodesic: state.geodesic)))
+        let holes = state.holes.map {
+            ensureCounterClockwise(openRing(toRing($0, geodesic: state.geodesic)))
+        }
         let parts = ([outer] + holes).map { ring in
             MutablePart(
                 points: ring.map { $0.toArcGISPoint(spatialReference: .wgs84) },
@@ -73,6 +79,15 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
             )
         }
         return Polygon(parts: parts)
+    }
+
+    /// リングをコア共通の補間で密度化する。生の頂点だと ArcGIS が辺を測地線として描くため、
+    /// 非 geodesic の直線辺は線形補間で近似する（android-sdk と同じ対応）。geodesic は
+    /// 世界マスク級のリングが過密になって描画に失敗しないよう粗めの分割長にする。
+    private func toRing(_ points: [GeoPointProtocol], geodesic: Bool) -> [GeoPointProtocol] {
+        geodesic
+            ? createInterpolatePoints(points, maxSegmentLength: 100_000.0)
+            : createLinearInterpolatePoints(points)
     }
 
     private func openRing(_ points: [GeoPointProtocol]) -> [GeoPointProtocol] {

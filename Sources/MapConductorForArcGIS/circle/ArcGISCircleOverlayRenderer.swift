@@ -1,6 +1,7 @@
 import ArcGIS
 import MapConductorCore
 
+@MainActor
 final class ArcGISCircleOverlayRenderer: AbstractCircleOverlayRenderer<Graphic> {
     let circleLayer: GraphicsOverlay
 
@@ -40,15 +41,15 @@ final class ArcGISCircleOverlayRenderer: AbstractCircleOverlayRenderer<Graphic> 
         }
     }
 
+    /// Builds the circle ring from the core `circleToRing` (shared across providers, WGS84
+    /// radius), closed with `closeRing` and normalized to +/-180 for ArcGIS.
     private func makeGeometry(_ state: CircleState) -> Geometry {
-        let points = stride(from: 0, through: 360, by: 8).map { bearing in
-            calculateDestinationPoint(
-                lat: state.center.latitude,
-                lon: state.center.longitude,
-                bearing: Double(bearing),
-                distance: state.radiusMeters
-            ).toArcGISPoint(spatialReference: .wgs84)
-        }
+        let points = closeRing(circleToRing(
+            center: state.center,
+            radiusMeters: state.radiusMeters,
+            geodesic: state.geodesic
+        ))
+        .map { $0.normalize().toArcGISPoint(spatialReference: .wgs84) }
         return Polygon(points: points, spatialReference: .wgs84)
     }
 
