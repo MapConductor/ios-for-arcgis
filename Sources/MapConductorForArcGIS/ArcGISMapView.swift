@@ -87,20 +87,6 @@ private struct ArcGISMapViewBody: View {
                             await model.controller?.handleLongPress(screenPoint: screenPoint, mapPoint: mapPoint)
                         }
                     }
-                    .onDragGesture(
-                        shouldBegin: { screenPoint, mapPoint in
-                            await model.handleDragShouldBegin(screenPoint: screenPoint, mapPoint: mapPoint)
-                        },
-                        onChanged: { screenPoint, mapPoint in
-                            model.handleDragChanged(screenPoint: screenPoint, mapPoint: mapPoint)
-                        },
-                        onEnded: { screenPoint, mapPoint in
-                            model.handleDragEnded(screenPoint: screenPoint, mapPoint: mapPoint)
-                        },
-                        onCancelled: {
-                            model.handleDragCancelled()
-                        }
-                    )
                     .onDrawStatusChanged { status in
                         NSLog("[MapConductor][ArcGIS] drawStatus=%@", String(describing: status))
                     }
@@ -118,6 +104,23 @@ private struct ArcGISMapViewBody: View {
                             model.handleDragInteractionEnded()
                         }
                     }
+                    // マーカードラッグは「1秒長押し → ドラッグ」。ArcGIS の onLongPressGesture /
+                    // onDragGesture は排他で長押し後にドラッグが発火しないため、単一の SwiftUI
+                    // シーケンスジェスチャを使う（ArcGIS 専用モディファイアの後に置く必要がある）。
+                    // highPriorityGesture なので 1 秒ホールド成立時のみ地図パンより優先される
+                    // （通常の即時ドラッグはホールド不成立→地図パン、タップ→InfoBubble）。
+                    .highPriorityGesture(
+                        LongPressGesture(minimumDuration: 1.0)
+                            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+                            .onChanged { value in
+                                if case let .second(true, drag?) = value {
+                                    model.handleHoldDrag(location: drag.location, start: drag.startLocation)
+                                }
+                            }
+                            .onEnded { _ in
+                                model.handleHoldDragEnd()
+                            }
+                    )
                     .onAppear {
                         NSLog("[MapConductor][ArcGIS] SceneView onAppear begin")
                         model.attach(proxy: proxy)
@@ -235,6 +238,8 @@ private final class ArcGISMapViewModel: ObservableObject {
     private var overlayScope: MapOverlayScope?
     private var didBind = false
     private var dragState: MarkerDragState = .idle
+    /// 「1秒長押し → ドラッグ」ジェスチャでマーカーを掴んでいる間 true。
+    private var holdDragActive = false
 
     private var cameraMoveEndWorkItem: DispatchWorkItem?
     private let cameraMoveEndDebounceSeconds = 0.18
@@ -437,11 +442,29 @@ private final class ArcGISMapViewModel: ObservableObject {
         NSLog("[MapConductor][ArcGIS] unbind end")
     }
 
-    func handleDragShouldBegin(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
-        guard let controller else { return false }
-        let didStart = await controller.handleMarkerDragStart(screenPoint: screenPoint, mapPoint: mapPoint)
-        dragState = didStart ? .dragging : .idle
-        return didStart
+    /// 「1秒長押し → ドラッグ」の移動ハンドラ。最初の移動でホールド地点のマーカーを掴み、
+    /// 以降の移動でマーカーを追従させる（android の long-press ドラッグ相当）。
+    func handleHoldDrag(location: CGPoint, start: CGPoint) {
+        guard let controller else { return }
+        if !holdDragActive {
+            holdDragActive = true
+            Task {
+                let started = await controller.handleMarkerDragStart(screenPoint: start, mapPoint: nil)
+                if started {
+                    _ = await controller.handleMarkerDrag(screenPoint: location)
+                } else {
+                    holdDragActive = false
+                }
+            }
+        } else {
+            Task { _ = await controller.handleMarkerDrag(screenPoint: location) }
+        }
+    }
+
+    func handleHoldDragEnd() {
+        guard holdDragActive else { return }
+        holdDragActive = false
+        _ = controller?.finishMarkerDrag()
     }
 
     func handleDragChanged(screenPoint: CGPoint, mapPoint: Point?) {
@@ -487,6 +510,11 @@ private final class ArcGISMapViewModel: ObservableObject {
     }
 
     func handleDragInteractionEnded() {
+        // ホールドドラッグが何らかの理由で onEnded を受け取れなかった場合の保険。
+        if holdDragActive {
+            holdDragActive = false
+            _ = controller?.finishMarkerDrag()
+        }
         guard dragState == .dragging else { return }
         _ = controller?.finishMarkerDrag()
         dragState = .idle
@@ -575,6 +603,11 @@ private final class ArcGISMapViewModel: ObservableObject {
                 let renderer = ArcGISMarkerRenderer(markerLayer: markerLayer, container: container)
                 strategyMarkerRenderer = renderer
                 strategyMarkerController = ArcGISStrategyController(strategy: strategy, renderer: renderer)
+                // find() の android 同等 screen 空間判定用に geo→screen 投影を注入する。
+                strategyMarkerController?.markerProjector = { [weak self] geo in
+                    guard let proxy = self?.container.proxy?.proxy else { return nil }
+                    return proxy.screenPoint(fromLocation: geo.toArcGISPoint(spatialReference: .wgs84))?.screenPoint
+                }
                 Task { [weak self] in
                     guard let self else { return }
                     let pos = self.container.lastCameraPosition

@@ -84,20 +84,6 @@ private struct ArcGISMapView2DBody: View {
                     await model.controller?.handleLongPress(screenPoint: screenPoint, mapPoint: mapPoint)
                 }
             }
-            .onDragGesture(
-                shouldBegin: { screenPoint, mapPoint in
-                    await model.handleDragShouldBegin(screenPoint: screenPoint, mapPoint: mapPoint)
-                },
-                onChanged: { screenPoint, mapPoint in
-                    model.handleDragChanged(screenPoint: screenPoint, mapPoint: mapPoint)
-                },
-                onEnded: { screenPoint, mapPoint in
-                    model.handleDragEnded(screenPoint: screenPoint, mapPoint: mapPoint)
-                },
-                onCancelled: {
-                    model.handleDragCancelled()
-                }
-            )
             .onViewpointChanged(kind: .centerAndScale) { viewpoint in
                 model.updateViewpoint(viewpoint)
             }
@@ -106,6 +92,23 @@ private struct ArcGISMapView2DBody: View {
                     model.handleDragInteractionEnded()
                 }
             }
+            // マーカードラッグは「1秒長押し → ドラッグ」。ArcGIS の onLongPressGesture /
+            // onDragGesture は排他で長押し後にドラッグが発火しないため、単一の SwiftUI
+            // シーケンスジェスチャを使う（ArcGIS 専用モディファイアの後に置く必要がある）。
+            // highPriorityGesture なので 1 秒ホールド成立時のみ地図パンより優先される
+            // （通常の即時ドラッグはホールド不成立→地図パン、タップ→InfoBubble）。
+            .highPriorityGesture(
+                LongPressGesture(minimumDuration: 1.0)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+                    .onChanged { value in
+                        if case let .second(true, drag?) = value {
+                            model.handleHoldDrag(location: drag.location, start: drag.startLocation)
+                        }
+                    }
+                    .onEnded { _ in
+                        model.handleHoldDragEnd()
+                    }
+            )
             .onAppear {
                 model.attach(proxy: proxy)
                 model.bind(
@@ -157,6 +160,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
     private var overlayScope: MapOverlayScope?
     private var didBind = false
     private var dragState: MarkerDragState2D = .idle
+    /// 「1秒長押し → ドラッグ」ジェスチャでマーカーを掴んでいる間 true。
+    private var holdDragActive = false
 
     init(state: ArcGISMapViewState) {
         let map = ArcGIS.Map(basemapStyle: ArcGISDesign.toBasemapStyle(state.mapDesignType))
@@ -255,11 +260,32 @@ private final class ArcGISMapView2DModel: ObservableObject {
         didBind = false
     }
 
-    func handleDragShouldBegin(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
-        guard let controller else { return false }
-        let didStart = await controller.handleMarkerDragStart(screenPoint: screenPoint, mapPoint: mapPoint)
-        dragState = didStart ? .dragging : .idle
-        return didStart
+    /// 長押しでマーカードラッグを arm する（android 同様）。ドラッグ可能なマーカー上なら
+    /// ドラッグを開始状態にし、そうでなければマップの長押しイベントとして扱う。
+    /// これにより通常のタップは奪われず InfoBubble が開ける。
+    /// 「1秒長押し → ドラッグ」の移動ハンドラ。最初の移動でホールド地点のマーカーを掴み、
+    /// 以降の移動でマーカーを追従させる（android の long-press ドラッグ相当）。
+    func handleHoldDrag(location: CGPoint, start: CGPoint) {
+        guard let controller else { return }
+        if !holdDragActive {
+            holdDragActive = true
+            Task {
+                let started = await controller.handleMarkerDragStart(screenPoint: start, mapPoint: nil)
+                if started {
+                    _ = await controller.handleMarkerDrag(screenPoint: location)
+                } else {
+                    holdDragActive = false
+                }
+            }
+        } else {
+            Task { _ = await controller.handleMarkerDrag(screenPoint: location) }
+        }
+    }
+
+    func handleHoldDragEnd() {
+        guard holdDragActive else { return }
+        holdDragActive = false
+        _ = controller?.finishMarkerDrag()
     }
 
     func handleDragChanged(screenPoint: CGPoint, mapPoint: Point?) {
@@ -296,6 +322,11 @@ private final class ArcGISMapView2DModel: ObservableObject {
     }
 
     func handleDragInteractionEnded() {
+        // ホールドドラッグが何らかの理由で onEnded を受け取れなかった場合の保険。
+        if holdDragActive {
+            holdDragActive = false
+            _ = controller?.finishMarkerDrag()
+        }
         guard dragState == .dragging else { return }
         _ = controller?.finishMarkerDrag()
         dragState = .idle

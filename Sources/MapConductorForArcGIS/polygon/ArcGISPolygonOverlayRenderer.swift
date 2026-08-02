@@ -40,8 +40,17 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
                 : current.state
             polygon.geometry = makeGeometry(resolved)
         }
-        polygon.symbol = makeSymbol(current.state)
-        polygon.setAttributeValue(current.state.zIndex, forKey: "zIndex")
+
+        // Android 実装と同様、ドラッグで geometry だけが変わった場合は symbol を作り直さない。
+        // ArcGIS の Graphic に不要な更新を加えないことで、連続ドラッグ時の描画負荷を抑える。
+        if finger.fillColor != prevFinger.fillColor
+            || finger.strokeColor != prevFinger.strokeColor
+            || finger.strokeWidth != prevFinger.strokeWidth {
+            polygon.symbol = makeSymbol(current.state)
+        }
+        if finger.zIndex != prevFinger.zIndex {
+            polygon.setAttributeValue(current.state.zIndex, forKey: "zIndex")
+        }
         return polygon
     }
 
