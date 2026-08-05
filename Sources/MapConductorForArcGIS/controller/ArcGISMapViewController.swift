@@ -1,4 +1,5 @@
 import ArcGIS
+import CoreGraphics
 import Foundation
 import MapConductorCore
 
@@ -24,6 +25,21 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     private var cameraMoveStartListener: OnCameraMoveHandler?
     private var cameraMoveListener: OnCameraMoveHandler?
     private var cameraMoveEndListener: OnCameraMoveHandler?
+
+    /// ArcGIS はネイティブのカメラ範囲制限 API を持たないため、android-for-arcgis と同じく
+    /// カメラ停止時に矩形内へクランプして再適用する方式で制限する。
+    private let cameraRestrictionClamp = CameraRestrictionClamp()
+
+    func setCameraRestriction(_ restriction: CameraRestriction?) {
+        cameraRestrictionClamp.set(restriction)
+    }
+
+    /// カメラ停止時に制限違反を補正する。補正したら `true`。
+    func applyCameraRestrictionCorrectionIfNeeded(_ current: MapCameraPosition) -> Bool {
+        guard let corrected = cameraRestrictionClamp.correction(for: current) else { return false }
+        moveCamera(position: corrected)
+        return true
+    }
     private var mapClickListener: OnMapEventHandler?
     private var mapLongClickListener: OnMapEventHandler?
     private var mapInitializedListener: OnMapInitializedHandler?
@@ -114,17 +130,56 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     func fitBounds(bounds: GeoRectBounds, padding: Int) {
         guard let sw = bounds.southWest,
               let ne = bounds.northEast else { return }
+        // SceneViewProxy exposes no padding-aware fit API (only the 2D MapViewProxy has
+        // setViewpointGeometry(_:padding:)), so approximate the requested screen padding (points) by
+        // expanding the target bounds proportionally to the padded fraction of the viewport before
+        // framing them. With no viewport measured yet, this degrades to the unpadded fit.
+        let rect = Self.boundsExpandedForPadding(
+            minLon: sw.longitude,
+            minLat: sw.latitude,
+            maxLon: ne.longitude,
+            maxLat: ne.latitude,
+            padding: padding,
+            viewportSize: typedHolder.mapView.viewportSize
+        )
         let envelope = Envelope(
-            xMin: sw.longitude,
-            yMin: sw.latitude,
-            xMax: ne.longitude,
-            yMax: ne.latitude,
+            xMin: rect.minLon,
+            yMin: rect.minLat,
+            xMax: rect.maxLon,
+            yMax: rect.maxLat,
             spatialReference: .wgs84
         )
         let viewpoint = Viewpoint(boundingGeometry: envelope)
         Task {
             _ = await typedHolder.mapView.proxy?.proxy.setViewpoint(viewpoint)
         }
+    }
+
+    private static func boundsExpandedForPadding(
+        minLon: Double,
+        minLat: Double,
+        maxLon: Double,
+        maxLat: Double,
+        padding: Int,
+        viewportSize: CGSize?
+    ) -> (minLon: Double, minLat: Double, maxLon: Double, maxLat: Double) {
+        guard padding > 0, let size = viewportSize, size.width > 0, size.height > 0 else {
+            return (minLon, minLat, maxLon, maxLat)
+        }
+        let p = CGFloat(padding)
+        // Grow the framed extent so that `padding` points stay empty on each edge of the viewport.
+        let ratioW = Double(size.width / max(1.0, size.width - 2 * p))
+        let ratioH = Double(size.height / max(1.0, size.height - 2 * p))
+        let centerLon = (minLon + maxLon) / 2.0
+        let centerLat = (minLat + maxLat) / 2.0
+        let halfWidth = (maxLon - minLon) / 2.0 * ratioW
+        let halfHeight = (maxLat - minLat) / 2.0 * ratioH
+        return (
+            centerLon - halfWidth,
+            centerLat - halfHeight,
+            centerLon + halfWidth,
+            centerLat + halfHeight
+        )
     }
 
     func setMapDesignType(_ value: ArcGISMapDesignType) {
@@ -156,7 +211,6 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
 
     @MainActor
     func handleTap(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
-        let clickRadiusPt: CGFloat = 44
         guard let touchPosition = mapPoint?.toGeoPoint() else { return false }
 
 //        MapConductor manages all markers by our MakerManager.
@@ -176,23 +230,17 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
 //        }
 
         
-        if let markerEntity = markerController.find(position: touchPosition),
-           let markerPoint = toScreenPoint(from: markerEntity.state.position) {
-            let dist = hypot(screenPoint.x - markerPoint.x, screenPoint.y - markerPoint.y)
-            if dist < clickRadiusPt {
-                markerController.dispatchClick(state: markerEntity.state)
-                return true
-            }
+        // ヒット判定（アイコン矩形 + tapTolerance）は find() 側が行う。
+        // 半径固定だと大きいアイコンは端が反応せず、小さいアイコンは離れていても反応してしまう。
+        if let markerEntity = markerController.find(position: touchPosition) {
+            markerController.dispatchClick(state: markerEntity.state)
+            return true
         }
 
         if let strategyController = strategyMarkerControllerProvider(),
-           let markerEntity = strategyController.find(position: touchPosition),
-           let markerPoint = toScreenPoint(from: markerEntity.state.position) {
-            let dist = hypot(screenPoint.x - markerPoint.x, screenPoint.y - markerPoint.y)
-            if dist < clickRadiusPt {
-                strategyController.dispatchClick(markerEntity.state)
-                return true
-            }
+           let markerEntity = strategyController.find(position: touchPosition) {
+            strategyController.dispatchClick(markerEntity.state)
+            return true
         }
         
         if let circle = circleController.find(position: touchPosition) {
@@ -291,13 +339,5 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
             return nil
         }
         return point.toGeoPoint()
-    }
-    @MainActor
-    private func toScreenPoint(from geoPoint: GeoPoint) -> CGPoint? {
-        guard let proxy = typedHolder.mapView.proxy?.proxy,
-              let point = proxy.screenPoint(fromLocation: geoPoint.toArcGISPoint()) else {
-            return nil
-        }
-        return point.screenPoint
     }
 }

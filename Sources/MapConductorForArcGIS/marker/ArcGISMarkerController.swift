@@ -74,8 +74,32 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         markers.forEach { subscribeToMarker($0.state) }
     }
 
+    /// android-for-arcgis の `ArcGISMarkerController.find()` と同じく、最近傍マーカーを
+    /// 「アイコン矩形 + tapTolerance」で判定する。半径固定だと大きいアイコンは端が反応せず、
+    /// 小さいアイコンは離れていても反応してしまうため、アイコンの実寸とアンカーを使う。
+    ///
+    /// 投影できない場合（proxy 未接続など）は判定できないので、従来どおり最近傍を返す。
     override func find(position: GeoPointProtocol) -> MarkerEntity<Graphic>? {
-        return markerManager.findNearest(position: position) 
+        guard let nearest = markerManager.findNearest(position: position) else { return nil }
+        // 基底の `find` は nonisolated だが、呼び出し元はタップ処理（`handleTap`）だけで
+        // 常にメインアクター上。投影 API（`ArcGISMapContext`）はメインアクター隔離のため、
+        // ここで隔離済みであることを明示する。
+        return MainActor.assumeIsolated {
+            guard let container,
+                  let touchScreen = container.screenPoint(
+                      fromLocation: position.toArcGISPoint(spatialReference: .wgs84)
+                  ),
+                  let markerScreen = container.screenPoint(
+                      fromLocation: nearest.state.position.toArcGISPoint(spatialReference: .wgs84)
+                  ) else {
+                return nearest
+            }
+            return MarkerHitTest.hitsIcon(
+                touchScreen: touchScreen,
+                markerScreen: markerScreen,
+                state: nearest.state
+            ) ? nearest : nil
+        }
     }
 
     override func add(data: [MarkerState]) async {
@@ -208,6 +232,9 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         return wasDragging
     }
 
+    /// ドラッグ開始時のヒットテスト。タップ（``find(position:)``）と同じ
+    /// 「アイコン矩形 + tapTolerance」で判定する。以前はアイコンの外接円を使った半径判定
+    /// （`max(22, 最大辺 / 2)`）で、同じアイコンでもタップとドラッグで当たる範囲が違っていた。
     private func draggableMarker(at screenPoint: CGPoint) -> MarkerEntity<Graphic>? {
         guard let container else { return nil }
 
@@ -217,11 +244,14 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         for entity in markerManager.allEntities() where entity.state.draggable {
             let location = entity.state.position.toArcGISPoint(spatialReference: .wgs84)
             guard let projected = container.screenPoint(fromLocation: location) else { continue }
+            guard MarkerHitTest.hitsIcon(
+                touchScreen: screenPoint,
+                markerScreen: projected,
+                state: entity.state
+            ) else { continue }
 
-            let icon = (entity.state.icon ?? DefaultMarkerIcon()).toBitmapIcon()
-            let radius = max(22, max(icon.size.width, icon.size.height) * 0.5)
             let distance = hypot(screenPoint.x - projected.x, screenPoint.y - projected.y)
-            if distance <= radius, distance < bestDistance {
+            if distance < bestDistance {
                 bestDistance = distance
                 bestEntity = entity
             }

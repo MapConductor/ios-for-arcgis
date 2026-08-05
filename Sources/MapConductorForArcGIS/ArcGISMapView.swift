@@ -12,11 +12,13 @@ private typealias ArcGISStrategyController = StrategyMarkerController<
 
 public struct ArcGISMapView: View {
     @ObservedObject private var state: ArcGISMapViewState
+    private let cameraRestriction: CameraRestriction?
     private let handlers: MapViewHandlers<ArcGISMapViewState>
     private let content: () -> MapViewContent
 
     public init(
         state: ArcGISMapViewState,
+        cameraRestriction: CameraRestriction? = nil,
         onMapLoaded: OnMapLoadedHandler<ArcGISMapViewState>? = nil,
         onMapClick: OnMapEventHandler? = nil,
         onMapLongClick: OnMapEventHandler? = nil,
@@ -27,6 +29,7 @@ public struct ArcGISMapView: View {
         @MapViewContentBuilder content: @escaping () -> MapViewContent = { MapViewContent() }
     ) {
         self.state = state
+        self.cameraRestriction = cameraRestriction
         self.handlers = MapViewHandlers(
             onMapLoaded: onMapLoaded,
             onMapClick: onMapClick,
@@ -40,9 +43,16 @@ public struct ArcGISMapView: View {
     }
 
     public var body: some View {
-        let mapContent = content()
-        ArcGISMapViewBody(
+        // The provider's registry is in scope only while content is being assembled —
+        // the same window in which Compose provides `LocalMapServiceRegistry` around the
+        // content lambda. Bracketing the pass lets a removed plugin be noticed.
+        let support = state.serviceRegistry.get(MarkerRenderingSupportKey.self)
+        support?.beginContentPass()
+        let mapContent = MapServiceRegistryScope.with(state.serviceRegistry) { content() }
+        support?.endContentPass()
+        return ArcGISMapViewBody(
             state: state,
+            cameraRestriction: cameraRestriction,
             handlers: handlers,
             content: mapContent
         )
@@ -52,6 +62,7 @@ public struct ArcGISMapView: View {
 private struct ArcGISMapViewBody: View {
     @ObservedObject var state: ArcGISMapViewState
 
+    let cameraRestriction: CameraRestriction?
     let handlers: MapViewHandlers<ArcGISMapViewState>
     let content: MapViewContent
 
@@ -59,10 +70,12 @@ private struct ArcGISMapViewBody: View {
 
     init(
         state: ArcGISMapViewState,
+        cameraRestriction: CameraRestriction? = nil,
         handlers: MapViewHandlers<ArcGISMapViewState>,
         content: MapViewContent
     ) {
         self.state = state
+        self.cameraRestriction = cameraRestriction
         self.handlers = handlers
         self.content = content
         ArcGISSdkInitialization.runOnce(handlers.sdkInitialize)
@@ -127,6 +140,7 @@ private struct ArcGISMapViewBody: View {
                         NSLog("[MapConductor][ArcGIS] proxy attached")
                         model.bind(
                             state: state,
+                            cameraRestriction: cameraRestriction,
                             onMapClick: handlers.onMapClick,
                             onMapLongClick: handlers.onMapLongClick,
                             onCameraMoveStart: handlers.onCameraMoveStart,
@@ -142,7 +156,7 @@ private struct ArcGISMapViewBody: View {
                         NSLog("[MapConductor][ArcGIS] SceneView onDisappear")
                         model.unbind(state: state)
                     }
-                    .task(id: content.identityFingerprint) {
+                    .task(id: content.identityFingerprint ^ model.strategyFingerprint) {
                         NSLog(
                             "[MapConductor][ArcGIS] content task fingerprint=%d markers=%d polylines=%d polygons=%d circles=%d groundImages=%d rasterLayers=%d infoBubbles=%d",
                             content.identityFingerprint,
@@ -170,10 +184,14 @@ private struct ArcGISMapViewBody: View {
                     .highPriorityGesture(DragGesture())
             }
         }
+        .onAppear { warnUnsupportedSceneGestures(state.uiSettings) }
+        .onChange(of: state.uiSettings) { _, ui in warnUnsupportedSceneGestures(ui) }
     }
 }
 
 private extension MapViewContent {
+    /// 差分検出用のフィンガープリント。strategy 由来のマーカーは `MapViewContent` から
+    /// 外れたため、``ArcGISMapViewModel/strategyFingerprint`` を足し合わせて使う。
     var identityFingerprint: Int {
         var hasher = Hasher()
         markers.forEach {
@@ -181,12 +199,6 @@ private extension MapViewContent {
             hasher.combine($0.state.position.latitude)
             hasher.combine($0.state.position.longitude)
         }
-        markerRenderingMarkers.forEach {
-            hasher.combine($0.id)
-            hasher.combine($0.position.latitude)
-            hasher.combine($0.position.longitude)
-        }
-        if markerRenderingStrategy != nil { hasher.combine(true) }
         polylines.forEach { hasher.combine($0.id) }
         polygons.forEach { hasher.combine($0.id) }
         circles.forEach { hasher.combine($0.id) }
@@ -225,7 +237,7 @@ private enum ArcGISSdkInitialization {
 }
 
 @MainActor
-private final class ArcGISMapViewModel: ObservableObject {
+private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport {
     let container: ArcGISSceneContainer
     private let markerLayer = GraphicsOverlay()
     private let polylineLayer = GraphicsOverlay()
@@ -250,6 +262,12 @@ private final class ArcGISMapViewModel: ObservableObject {
     private var strategyMarkerRenderer: ArcGISMarkerRenderer?
     private var strategyMarkerSubscriptions: [String: AnyCancellable] = [:]
     private var strategyMarkerStatesById: [String: MarkerState] = [:]
+    /// 接続中の strategy とそのマーカー。以前は `MapViewContent` の
+    /// markerRenderingStrategy / markerRenderingMarkers を毎回読んでいたが、
+    /// プラグインが ``MarkerRenderingSupport`` 経由で押し込む形に反転した。
+    private(set) var connectedStrategyMarkers: [MarkerState] = []
+    private(set) var hasConnectedStrategy = false
+    private var strategyConnectedThisPass = false
 
     let infoBubbleContainer = PassthroughContainerView()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
@@ -334,12 +352,19 @@ private final class ArcGISMapViewModel: ObservableObject {
 
     func bind(
         state: ArcGISMapViewState,
+        cameraRestriction: CameraRestriction?,
         onMapClick: OnMapEventHandler?,
         onMapLongClick: OnMapEventHandler?,
         onCameraMoveStart: OnCameraMoveHandler?,
         onCameraMove: OnCameraMoveHandler?,
         onCameraMoveEnd: OnCameraMoveHandler?
     ) {
+        // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
+        // from the registry; this provider never learns that clustering exists.
+        // 再バインド時に前回の capability が残らないよう、登録前に空にする
+        // （android-sdk の各 *MapView.kt が `registry.clear()` してから put するのと同じ）。
+        state.serviceRegistry.clear()
+        state.serviceRegistry.put(MarkerRenderingSupportKey.self, self)
         if didBind {
             NSLog("[MapConductor][ArcGIS] bind skipped because model is already bound")
             return
@@ -378,6 +403,8 @@ private final class ArcGISMapViewModel: ObservableObject {
         bindOverlayCollector(overlayScope.groundImageCollector, to: controller.groundImageController)
 
         state.setController(controller)
+        // android-for-arcgis がコントローラ生成直後に setCameraRestriction するのと同じ位置。
+        controller.setCameraRestriction(cameraRestriction)
         state.setSceneViewHolder(controller.typedHolder)
         controller.setMapClickListener(listener: onMapClick)
         controller.setMapLongClickListener(listener: onMapLongClick)
@@ -541,6 +568,10 @@ private final class ArcGISMapViewModel: ObservableObject {
                 paddings: position.paddings,
                 visibleRegion: vr
             )
+            // 範囲・ズーム制限に違反していれば矩形内へ引き戻す（ArcGIS はネイティブの範囲制限
+            // API が無いため）。再適用すると viewpointChanged が再発火し、そこでは補正不要に
+            // なり通常フローへ進む。android-for-arcgis と同一仕様。
+            if self.controller?.applyCameraRestrictionCorrectionIfNeeded(posWithVR) == true { return }
             self.controller?.notifyCameraMoveEnd(posWithVR)
             Task { [weak self] in
                 await self?.strategyMarkerController?.onCameraChanged(mapCameraPosition: posWithVR)
@@ -551,40 +582,8 @@ private final class ArcGISMapViewModel: ObservableObject {
     }
 
     private static func computeVisibleRegion(for position: MapCameraPosition, viewportSize: CGSize?) -> VisibleRegion? {
-        guard let size = viewportSize, size.width > 0, size.height > 0 else { return nil }
-
-        let center = GeoPoint.from(position: position.position)
-        let latRad = center.latitude * .pi / 180
-        // bearing θ: screen-up direction corresponds to geographic bearing θ
-        let θ = position.bearing * .pi / 180
-
-        // Web-Mercator ground resolution: metres per pixel at this zoom and latitude
-        let metersPerPixel = (2 * .pi * 6_371_000.0 * cos(latRad)) / (256.0 * pow(2.0, position.zoom))
-
-        let halfW = Double(size.width) / 2
-        let halfH = Double(size.height) / 2
-
-        // Convert screen offset (sx right, sy down) → geographic offset (east, north in metres)
-        // geo_east  =  (sx·cos θ − sy·sin θ) · m/px
-        // geo_north = (−sx·sin θ − sy·cos θ) · m/px
-        func cornerGeo(sxPx: Double, syPx: Double) -> GeoPoint {
-            let eastM  = ( sxPx * cos(θ) - syPx * sin(θ)) * metersPerPixel
-            let northM = (-sxPx * sin(θ) - syPx * cos(θ)) * metersPerPixel
-            let dLat = northM / 111_000.0
-            let dLng = eastM  / (111_000.0 * cos(latRad))
-            return GeoPoint(latitude: center.latitude + dLat, longitude: center.longitude + dLng)
-        }
-
-        // Screen corners: sx = signed x from centre, sy = signed y from centre (down positive)
-        let nl = cornerGeo(sxPx: -halfW, syPx: +halfH)  // bottom-left  → nearLeft
-        let nr = cornerGeo(sxPx: +halfW, syPx: +halfH)  // bottom-right → nearRight
-        let fl = cornerGeo(sxPx: -halfW, syPx: -halfH)  // top-left     → farLeft
-        let fr = cornerGeo(sxPx: +halfW, syPx: -halfH)  // top-right    → farRight
-
-        let bounds = GeoRectBounds()
-        [nl, nr, fl, fr].forEach { bounds.extend(point: $0) }
-
-        return VisibleRegion(bounds: bounds, nearLeft: nl, nearRight: nr, farLeft: fl, farRight: fr)
+        // 2D 側（ArcGISMapView2D）と同一の計算を使う。実体は ArcGISVisibleRegion.swift。
+        arcGISComputeVisibleRegion(for: position, viewportSize: viewportSize)
     }
 
     func syncInfoBubbles(_ bubbles: [InfoBubble]) {
@@ -595,8 +594,55 @@ private final class ArcGISMapViewModel: ObservableObject {
         infoBubbleCoordinator?.updateAllLayouts()
     }
 
-    private func updateStrategyRendering(_ content: MapViewContent) {
-        if let strategy = content.markerRenderingStrategy as? AnyMarkerRenderingStrategy<Graphic> {
+    /// strategy 由来のマーカーを含めたフィンガープリント。
+    var strategyFingerprint: Int {
+        var hasher = Hasher()
+        connectedStrategyMarkers.forEach {
+            hasher.combine($0.id)
+            hasher.combine($0.position.latitude)
+            hasher.combine($0.position.longitude)
+        }
+        hasher.combine(hasConnectedStrategy)
+        return hasher.finalize()
+    }
+
+    // MARK: - MarkerRenderingSupport
+    //
+    // ArcGIS は StrategyMarkerManager を使わず独自にレンダラーを持つため、モデル自身が
+    // capability を実装する。引き当ての向きは他プロバイダと同じで、クラスタリング側が
+    // MapServiceRegistry から解決して connect を呼ぶ。
+
+    @discardableResult
+    func connect(strategy: Any, markers: [MarkerState]) -> Bool {
+        guard strategy is AnyMarkerRenderingStrategy<Graphic> else { return false }
+        strategyConnectedThisPass = true
+        connectStrategyRendering(strategy)
+        hasConnectedStrategy = true
+        syncMarkers(markers)
+        return true
+    }
+
+    func syncMarkers(_ markers: [MarkerState]) {
+        connectedStrategyMarkers = markers
+        syncStrategyMarkers(markers)
+    }
+
+    func disconnect() {
+        connectStrategyRendering(nil)
+    }
+
+    func beginContentPass() {
+        strategyConnectedThisPass = false
+    }
+
+    func endContentPass() {
+        if !strategyConnectedThisPass, hasConnectedStrategy {
+            disconnect()
+        }
+    }
+
+    private func connectStrategyRendering(_ anyStrategy: Any?) {
+        if let strategy = anyStrategy as? AnyMarkerRenderingStrategy<Graphic> {
             if strategyMarkerController == nil ||
                 strategyMarkerController?.markerManager !== strategy.markerManager {
                 strategyMarkerRenderer?.unbind()
@@ -623,7 +669,6 @@ private final class ArcGISMapViewModel: ObservableObject {
                     await self.strategyMarkerController?.onCameraChanged(mapCameraPosition: posWithVR)
                 }
             }
-            syncStrategyMarkers(content.markerRenderingMarkers)
         } else {
             strategyMarkerSubscriptions.values.forEach { $0.cancel() }
             strategyMarkerSubscriptions.removeAll()
@@ -632,6 +677,8 @@ private final class ArcGISMapViewModel: ObservableObject {
             strategyMarkerRenderer = nil
             strategyMarkerController?.destroy()
             strategyMarkerController = nil
+            connectedStrategyMarkers = []
+            hasConnectedStrategy = false
         }
     }
 
@@ -686,11 +733,9 @@ private final class ArcGISMapViewModel: ObservableObject {
             return
         }
         controller.markerController.tilingOptions = content.markerTilingOptions
-        if content.markerRenderingStrategy != nil {
+        if hasConnectedStrategy {
             await controller.markerController.syncMarkers([])
-            updateStrategyRendering(content)
         } else {
-            updateStrategyRendering(content)
             await controller.markerController.syncMarkers(content.markers)
         }
         overlayScope?.groundImageCollector.sync(content.groundImages.map { $0.state })
@@ -713,4 +758,24 @@ private final class ArcGISMapViewModel: ObservableObject {
 private enum MarkerDragState {
     case idle
     case dragging
+}
+
+/// The 3D `SceneView` exposes only `interactiveNavigationDisabled`, an
+/// all-or-nothing switch, so individual gestures cannot be turned off. `scroll`
+/// is approximated by swallowing drags in an overlay (see `topContent` above);
+/// the rest have no equivalent. Use `ArcGISMapView2D`, which supports pan, zoom
+/// and rotate individually, when you need that control.
+private func warnUnsupportedSceneGestures(_ ui: MapUISettings) {
+    for (requested, gesture) in [
+        (ui.zoomGesture, MapGesture.zoom),
+        (ui.rotateGesture, MapGesture.rotate),
+        (ui.tiltGesture, MapGesture.tilt),
+    ] {
+        MapUISettingsDiagnostics.warnIfRequested(
+            requested,
+            gesture: gesture,
+            provider: "ArcGIS (3D SceneView)",
+            reason: "SceneView can only disable all navigation at once; use ArcGISMapView2D for per-gesture control"
+        )
+    }
 }

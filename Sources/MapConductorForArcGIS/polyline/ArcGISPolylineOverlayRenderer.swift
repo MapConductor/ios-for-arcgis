@@ -58,8 +58,8 @@ final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graph
         // 密な頂点列をそのまま渡す。生の頂点だと ArcGIS が辺を測地線として描くため、
         // 非 geodesic の直線が geodesic と同一形状になってしまう（android-sdk と同じ対応）。
         let points = state.geodesic
-            ? createInterpolatePoints(state.points)
-            : createLinearInterpolatePoints(state.points)
+            ? WGS84Geodesic.createInterpolatePoints(state.points)
+            : Planar.createInterpolatePoints(state.points)
         return Polyline(
             points: points.map { $0.toArcGISPoint(spatialReference: .wgs84) },
             spatialReference: .wgs84

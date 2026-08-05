@@ -9,7 +9,15 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
     @Published private var _mapDesignType: ArcGISMapDesignType
     @Published private var _uiSettings: MapUISettings
 
-    private var controller: ArcGISMapViewController?
+    /// 3D（`ArcGISMapView` / SceneView）がアタッチされている間のコントローラ。
+    private var sceneController: ArcGISMapViewController?
+
+    /// 2D（`ArcGISMapView2D` / MapView）がアタッチされている間のコントローラ。
+    ///
+    /// 以前は 3D のコントローラしか保持しておらず、2D では `moveCameraTo` / `fitBounds` /
+    /// `mapDesignType` がどこにも届かなかった（カメラ位置の値だけが更新され、地図は動かない）。
+    /// 2D と 3D が同時に生きることは無いので、アタッチされている方へ委譲する。
+    private var mapController: ArcGISMapView2DController?
 
     /// Provider-typed holder while the 3D `ArcGISMapView` (SceneView) is attached; nil in 2D mode.
     public private(set) var sceneViewHolder: ArcGISMapViewHolder?
@@ -24,7 +32,11 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
         get { _mapDesignType }
         set {
             _mapDesignType = newValue
-            controller?.setMapDesignType(newValue)
+            if let sceneController {
+                sceneController.setMapDesignType(newValue)
+            } else {
+                mapController?.setMapDesignType(newValue)
+            }
         }
     }
 
@@ -56,19 +68,19 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
 
     public override func moveCameraTo(cameraPosition: MapCameraPosition, durationMillis: Long? = 0) {
         let resolved = resolveCameraPosition(cameraPosition)
-        if let controller {
-            if let durationMillis, durationMillis > 0 {
-                controller.animateCamera(position: resolved, duration: durationMillis)
-            } else {
-                controller.moveCamera(position: resolved)
-            }
-        } else {
+        guard let controller = activeController else {
             _cameraPosition = resolved
+            return
+        }
+        if let durationMillis, durationMillis > 0 {
+            controller.animateCamera(position: resolved, duration: durationMillis)
+        } else {
+            controller.moveCamera(position: resolved)
         }
     }
 
     public override func fitBounds(bounds: GeoRectBounds, padding: Int) {
-        controller?.fitBounds(bounds: bounds, padding: padding)
+        activeController?.fitBounds(bounds: bounds, padding: padding)
     }
 
     public override func moveCameraTo(position: GeoPoint, durationMillis: Long? = 0) {
@@ -81,8 +93,13 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
         return nil
     }
 
+    /// 現在アタッチされている方のコントローラ。2D と 3D が同時に生きることは無い。
+    private var activeController: (any MapViewControllerProtocol)? {
+        sceneController ?? mapController
+    }
+
     func setController(_ controller: ArcGISMapViewController?) {
-        self.controller = controller
+        self.sceneController = controller
         if let controller {
             // setMapDesignType is intentionally omitted here: the Scene was already created
             // with the correct basemap style in ArcGISMapViewModel.init. Replacing the Basemap
@@ -92,7 +109,9 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
     }
 
     func setController(_ controller: ArcGISMapView2DController?) {
+        self.mapController = controller
         if let controller {
+            // 3D と同じ理由で setMapDesignType は呼ばない（Map は既に正しい basemap で生成済み）。
             controller.moveCamera(position: cameraPosition)
         }
     }

@@ -14,7 +14,7 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
     }
 
     override func createPolygon(state: PolygonState) async -> Graphic? {
-        let resolved = state.holes.count > 1 ? state.unionHoles() : state
+        let resolved = await resolveHoles(state)
         let graphic = Graphic(geometry: makeGeometry(resolved), symbol: makeSymbol(resolved))
         graphic.setAttributeValue(state.id, forKey: "id")
         graphic.setAttributeValue(state.zIndex, forKey: "zIndex")
@@ -35,10 +35,7 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
             || finger.geodesic != prevFinger.geodesic
 
         if shapeChanged {
-            let resolved = current.state.holes.count > 1
-                ? current.state.unionHoles()
-                : current.state
-            polygon.geometry = makeGeometry(resolved)
+            polygon.geometry = makeGeometry(await resolveHoles(current.state))
         }
 
         // Android 実装と同様、ドラッグで geometry だけが変わった場合は symbol を作り直さない。
@@ -76,6 +73,21 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
 
     // MARK: - Geometry / Symbol helpers
 
+    /// 複数の穴が重なっている場合は結合（union）して重複を解消する。
+    /// 他プロバイダ（Mapbox/MapLibre/HERE/Google）と同じ `unionHoles()` を用いる。
+    ///
+    /// ArcGIS のマルチパートポリゴンは穴リングを個別のパートとして扱うため、重なった穴を
+    /// そのまま渡すと重なり部分が再び塗られる。コンポーネント層（`Polygon`）のユニオンは
+    /// state 1 インスタンスにつき 1 回きりで、頂点ドラッグ後の `state.holes` 差し替えには
+    /// 追従しないため、android-for-arcgis と同じくここでも結合する。
+    ///
+    /// android-for-arcgis が `withContext(Dispatchers.Default)` で逃がしているのと同じく、
+    /// 平面アレンジメント（辺数に対して O(n²)）は MainActor の外で回す。
+    private func resolveHoles(_ state: PolygonState) async -> PolygonState {
+        guard state.holes.count > 1 else { return state }
+        return await state.unionHolesInBackground()
+    }
+
     private func makeGeometry(_ state: PolygonState) -> Geometry {
         let outer = ensureClockwiseRing(openRing(toRing(state.points, geodesic: state.geodesic)))
         let holes = state.holes.map {
@@ -95,8 +107,8 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
     /// 世界マスク級のリングが過密になって描画に失敗しないよう粗めの分割長にする。
     private func toRing(_ points: [GeoPointProtocol], geodesic: Bool) -> [GeoPointProtocol] {
         geodesic
-            ? createInterpolatePoints(points, maxSegmentLength: 100_000.0)
-            : createLinearInterpolatePoints(points)
+            ? WGS84Geodesic.createInterpolatePoints(points, maxSegmentLength: 100_000.0)
+            : Planar.createInterpolatePoints(points)
     }
 
     private func openRing(_ points: [GeoPointProtocol]) -> [GeoPointProtocol] {

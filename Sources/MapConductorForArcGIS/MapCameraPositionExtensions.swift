@@ -21,8 +21,6 @@ public extension MapCameraPosition {
             viewportWidthPx: width,
             viewportHeightPx: height
         )
-        
-        NSLog("ArcGIS (in)position=\(position),(in)tilt=\(tilt), (out)target=\(targetPoint), (out)distance=\(distance), (out)cameraPitchOffset=\(tilt)")
         return calculateCameraForOrbitParameters(
             targetPoint: targetPoint,
             distance: distance,

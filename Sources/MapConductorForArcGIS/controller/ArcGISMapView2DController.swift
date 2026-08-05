@@ -1,4 +1,5 @@
 import ArcGIS
+import CoreGraphics
 import Foundation
 import MapConductorCore
 
@@ -14,9 +15,47 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     let groundImageController: ArcGISGroundImageController
     let rasterLayerController: ArcGISRasterLayerController
 
+    /// クラスタ等のプラグインが接続中に使う描画コントローラ。3D 側と同じく、
+    /// 接続状況が変わるため毎回 provider から取り直す。
+    private let strategyMarkerControllerProvider: () -> ArcGISStrategyMarkerController?
+
     private var cameraMoveStartListener: OnCameraMoveHandler?
     private var cameraMoveListener: OnCameraMoveHandler?
     private var cameraMoveEndListener: OnCameraMoveHandler?
+
+    /// パン範囲の制限に使うクランプ。
+    ///
+    /// ArcGIS にはカメラ *範囲*（矩形）の制限 API が無いため、パンは android-for-arcgis と
+    /// 同じくカメラ停止時に矩形内へクランプして再適用する方式で制限する。
+    /// ズームは ``applyScaleLimits(_:)`` でネイティブの `Map.minScale` / `Map.maxScale` を使う。
+    private let cameraRestrictionClamp = CameraRestrictionClamp()
+
+    func setCameraRestriction(_ restriction: CameraRestriction?) {
+        cameraRestrictionClamp.set(restriction)
+        applyScaleLimits(restriction)
+    }
+
+    /// ズーム制限を ArcGIS のネイティブなスケール制限へ変換して適用する。
+    ///
+    /// ArcGIS の縮尺は分母（1:N）で表され、`Map.minScale` が「最も引いた側」＝ N が大きい方、
+    /// `Map.maxScale` が「最も寄せた側」＝ N が小さい方に対応する。統一ズーム（Google 準拠）とは
+    /// 大小が逆になるため、`minZoom → minScale` / `maxZoom → maxScale` と読み替えて変換する。
+    ///
+    /// `nil` は ArcGIS 側で「制限なし」を意味するので、未指定時はそのまま `nil` を渡す。
+    ///
+    /// 縮尺は投影座標系上の公称縮尺で緯度に依存しないため（``zoomToScale(_:)``）、
+    /// `Map.minScale` / `maxScale` のような緯度に依らない定数へそのまま変換できる。
+    private func applyScaleLimits(_ restriction: CameraRestriction?) {
+        typedHolder.map.minScale = restriction?.minZoom.map { Self.zoomToScale($0) }
+        typedHolder.map.maxScale = restriction?.maxZoom.map { Self.zoomToScale($0) }
+    }
+
+    /// カメラ停止時に制限違反を補正する。補正したら `true`。
+    func applyCameraRestrictionCorrectionIfNeeded(_ current: MapCameraPosition) -> Bool {
+        guard let corrected = cameraRestrictionClamp.correction(for: current) else { return false }
+        moveCamera(position: corrected)
+        return true
+    }
     private var mapClickListener: OnMapEventHandler?
     private var mapLongClickListener: OnMapEventHandler?
     private var mapInitializedListener: OnMapInitializedHandler?
@@ -29,7 +68,8 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         polygonController: ArcGISPolygonOverlayController,
         circleController: ArcGISCircleOverlayController,
         groundImageController: ArcGISGroundImageController,
-        rasterLayerController: ArcGISRasterLayerController
+        rasterLayerController: ArcGISRasterLayerController,
+        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil }
     ) {
         self.typedHolder = holder
         self.holder = AnyMapViewHolder(holder)
@@ -39,6 +79,7 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         self.circleController = circleController
         self.groundImageController = groundImageController
         self.rasterLayerController = rasterLayerController
+        self.strategyMarkerControllerProvider = strategyMarkerControllerProvider
     }
 
     func clearOverlays() async {
@@ -86,9 +127,10 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
             yMax: ne.latitude,
             spatialReference: .wgs84
         )
-        let viewpoint = Viewpoint(boundingGeometry: envelope)
         Task { @MainActor in
-            _ = await typedHolder.mapView.proxy?.proxy.setViewpoint(viewpoint)
+            // MapViewProxy.setViewpointGeometry applies the screen-space padding (points) on every
+            // edge while framing the geometry — the padding-aware equivalent of setViewpoint.
+            _ = await typedHolder.mapView.proxy?.proxy.setViewpointGeometry(envelope, padding: CGFloat(max(0, padding)))
         }
     }
 
@@ -113,15 +155,20 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
 
     @MainActor
     func handleTap(screenPoint: CGPoint, mapPoint: Point?) async -> Bool {
-        guard let touchPosition = mapPoint?.toGeoPoint() else { return false }
+        guard let touchPosition = mapPoint?.projectedToWGS84().toGeoPoint() else { return false }
 
-        if let markerEntity = markerController.find(position: touchPosition),
-           let markerPoint = toScreenPoint(from: markerEntity.state.position) {
-            let dist = hypot(screenPoint.x - markerPoint.x, screenPoint.y - markerPoint.y)
-            if dist < 44 {
-                markerController.dispatchClick(state: markerEntity.state)
-                return true
-            }
+        // ヒット判定（アイコン矩形 + tapTolerance）は find() が行う。
+        if let markerEntity = markerController.find(position: touchPosition) {
+            markerController.dispatchClick(state: markerEntity.state)
+            return true
+        }
+        // クラスタ等のプラグインが描画したマーカー。3D 側 `ArcGISMapViewController` と同じく、
+        // content 由来のマーカーの次に判定する（こちらは Core の StrategyMarkerController が
+        // 同じアイコン矩形判定を行う）。
+        if let strategyController = strategyMarkerControllerProvider(),
+           let markerEntity = strategyController.find(position: touchPosition) {
+            strategyController.dispatchClick(markerEntity.state)
+            return true
         }
         if let circle = circleController.find(position: touchPosition) {
             circleController.dispatchClick(event: CircleEvent(state: circle.state, clicked: touchPosition))
@@ -147,10 +194,10 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     func handleLongPress(screenPoint: CGPoint, mapPoint: Point?) async {
         let touchPosition: GeoPoint?
         if let mapPoint {
-            touchPosition = mapPoint.toGeoPoint()
+            touchPosition = mapPoint.projectedToWGS84().toGeoPoint()
         } else if let proxy = typedHolder.mapView.proxy?.proxy,
                   let resolvedPoint = proxy.location(fromScreenPoint: screenPoint) {
-            touchPosition = resolvedPoint.toGeoPoint()
+            touchPosition = resolvedPoint.projectedToWGS84().toGeoPoint()
         } else {
             touchPosition = nil
         }
@@ -186,7 +233,7 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
 
     @MainActor
     func handleMarkerDrag(mapPoint: Point) -> Bool {
-        markerController.handleDrag(at: mapPoint.toGeoPoint())
+        markerController.handleDrag(at: mapPoint.projectedToWGS84().toGeoPoint())
     }
 
     @MainActor
@@ -197,7 +244,7 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
 
     @MainActor
     func handleMarkerDragEnd(mapPoint: Point) -> Bool {
-        markerController.handleDragEnd(at: mapPoint.toGeoPoint())
+        markerController.handleDragEnd(at: mapPoint.projectedToWGS84().toGeoPoint())
     }
 
     @MainActor
@@ -212,13 +259,8 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
 
     private func toViewpoint(_ position: MapCameraPosition) -> Viewpoint {
         let point = position.position.toArcGISPoint(spatialReference: .wgs84)
-        let scale = ArcGISMapView2DController.zoomToScale(position.zoom, latitude: position.position.latitude)
+        let scale = ArcGISMapView2DController.zoomToScale(position.zoom)
         return Viewpoint(center: point, scale: scale)
-    }
-
-    @MainActor
-    private func toScreenPoint(from geoPoint: GeoPoint) -> CGPoint? {
-        typedHolder.mapView.proxy?.proxy.screenPoint(fromLocation: geoPoint.toArcGISPoint())
     }
 
     @MainActor
@@ -227,17 +269,32 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
               let point = proxy.location(fromScreenPoint: screenPoint) else {
             return nil
         }
-        return point.toGeoPoint()
+        return point.projectedToWGS84().toGeoPoint()
     }
 
-    static func zoomToScale(_ zoom: Double, latitude: Double) -> Double {
-        let resolution = Earth.circumferenceMeters * cos(.pi * latitude / 180.0) / (256.0 * pow(2.0, zoom))
-        return resolution * 96.0 * 39.37
+    /// 統一ズーム（Google 準拠）→ ArcGIS の縮尺分母。
+    ///
+    /// ArcGIS が扱う縮尺は Web メルカトルの **投影座標系上** の縮尺（公称縮尺）で、
+    /// 緯度による補正は含まない。Google のズームも同じく投影座標系（256px タイルで世界一周）で
+    /// 定義されているため、両者は緯度に依存しない 1 対 1 の対応になる。
+    ///
+    /// 以前はここに `cos(latitude)` を掛けて「地表の実距離」に直していたため、高緯度ほど
+    /// 縮尺が小さく（＝寄りすぎに）なっていた。緯度 65 度で Google 比 2.4 倍ほど拡大されており、
+    /// 同じ `MapCameraPosition` を渡しても Google Maps と表示範囲が一致しなかった。
+    ///
+    /// - `resolution`: 1 スクリーンピクセルあたりの投影メートル。
+    /// - `96 / 0.0254`: ESRI 標準の 96 DPI をメートルあたりのピクセル数へ換算した係数。
+    static func zoomToScale(_ zoom: Double) -> Double {
+        let resolution = Earth.circumferenceMeters / (256.0 * pow(2.0, zoom))
+        return resolution * pixelsPerMeterAt96DPI
     }
 
-    static func scaleToZoom(_ scale: Double, latitude: Double) -> Double {
-        let resolution = scale / (96.0 * 39.37)
-        let numerator = Earth.circumferenceMeters * cos(.pi * latitude / 180.0)
-        return log2(numerator / (256.0 * resolution))
+    /// ``zoomToScale(_:)`` の逆変換。
+    static func scaleToZoom(_ scale: Double) -> Double {
+        let resolution = scale / pixelsPerMeterAt96DPI
+        return log2(Earth.circumferenceMeters / (256.0 * resolution))
     }
+
+    /// 96 DPI（ESRI が縮尺計算に用いる標準値）における 1 メートルあたりのピクセル数。
+    private static let pixelsPerMeterAt96DPI: Double = 96.0 / 0.0254
 }

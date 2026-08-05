@@ -6,11 +6,13 @@ import SwiftUI
 
 public struct ArcGISMapView2D: View {
     @ObservedObject private var state: ArcGISMapViewState
+    private let cameraRestriction: CameraRestriction?
     private let handlers: MapViewHandlers<ArcGISMapViewState>
     private let content: () -> MapViewContent
 
     public init(
         state: ArcGISMapViewState,
+        cameraRestriction: CameraRestriction? = nil,
         onMapLoaded: OnMapLoadedHandler<ArcGISMapViewState>? = nil,
         onMapClick: OnMapEventHandler? = nil,
         onMapLongClick: OnMapEventHandler? = nil,
@@ -21,6 +23,7 @@ public struct ArcGISMapView2D: View {
         @MapViewContentBuilder content: @escaping () -> MapViewContent = { MapViewContent() }
     ) {
         self.state = state
+        self.cameraRestriction = cameraRestriction
         self.handlers = MapViewHandlers(
             onMapLoaded: onMapLoaded,
             onMapClick: onMapClick,
@@ -35,9 +38,16 @@ public struct ArcGISMapView2D: View {
     }
 
     public var body: some View {
-        let mapContent = content()
-        ArcGISMapView2DBody(
+        // The provider's registry is in scope only while content is being assembled —
+        // the same window in which Compose provides `LocalMapServiceRegistry` around the
+        // content lambda. Bracketing the pass lets a removed plugin be noticed.
+        let support = state.serviceRegistry.get(MarkerRenderingSupportKey.self)
+        support?.beginContentPass()
+        let mapContent = MapServiceRegistryScope.with(state.serviceRegistry) { content() }
+        support?.endContentPass()
+        return ArcGISMapView2DBody(
             state: state,
+            cameraRestriction: cameraRestriction,
             handlers: handlers,
             content: mapContent
         )
@@ -47,6 +57,7 @@ public struct ArcGISMapView2D: View {
 private struct ArcGISMapView2DBody: View {
     @ObservedObject var state: ArcGISMapViewState
 
+    let cameraRestriction: CameraRestriction?
     let handlers: MapViewHandlers<ArcGISMapViewState>
     let content: MapViewContent
 
@@ -54,10 +65,12 @@ private struct ArcGISMapView2DBody: View {
 
     init(
         state: ArcGISMapViewState,
+        cameraRestriction: CameraRestriction? = nil,
         handlers: MapViewHandlers<ArcGISMapViewState>,
         content: MapViewContent
     ) {
         self.state = state
+        self.cameraRestriction = cameraRestriction
         self.handlers = handlers
         self.content = content
         _model = StateObject(wrappedValue: ArcGISMapView2DModel(state: state))
@@ -74,6 +87,7 @@ private struct ArcGISMapView2DBody: View {
                 map: model.container.map,
                 graphicsOverlays: model.container.graphicsOverlays
             )
+            .interactionModes(arcGISInteractionModes(for: state.uiSettings))
             .onSingleTapGesture { screenPoint, mapPoint in
                 Task {
                     _ = await model.controller?.handleTap(screenPoint: screenPoint, mapPoint: mapPoint)
@@ -86,12 +100,19 @@ private struct ArcGISMapView2DBody: View {
             }
             .onViewpointChanged(kind: .centerAndScale) { viewpoint in
                 model.updateViewpoint(viewpoint)
+                // InfoBubble はスクリーン座標に置くため、カメラが動くたびに追従させる
+                // （3D 側 `ArcGISMapView` の onViewpointChanged / onNavigatingChanged と同じ）。
+                model.updateInfoBubbleLayouts()
+            }
+            .onNavigatingChanged { _ in
+                model.updateInfoBubbleLayouts()
             }
             .onInteractingChanged { isInteracting in
                 if !isInteracting {
                     model.handleDragInteractionEnded()
                 }
             }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
             // マーカードラッグは「1秒長押し → ドラッグ」。ArcGIS の onLongPressGesture /
             // onDragGesture は排他で長押し後にドラッグが発火しないため、単一の SwiftUI
             // シーケンスジェスチャを使う（ArcGIS 専用モディファイアの後に置く必要がある）。
@@ -113,6 +134,7 @@ private struct ArcGISMapView2DBody: View {
                 model.attach(proxy: proxy)
                 model.bind(
                     state: state,
+                    cameraRestriction: cameraRestriction,
                     onMapClick: handlers.onMapClick,
                     onMapLongClick: handlers.onMapLongClick,
                     onCameraMoveStart: handlers.onCameraMoveStart,
@@ -129,6 +151,10 @@ private struct ArcGISMapView2DBody: View {
                 await model.updateContent(content)
             }
             }
+
+            // InfoBubble を載せるパススルーコンテナ。地図の上に重ね、バブル以外の
+            // タッチは地図へ通す（3D 側 `ArcGISMapView` と同じ構成）。
+            InfoBubbleContainerRepresentable2D(container: model.infoBubbleContainer)
         }
     }
 }
@@ -142,8 +168,18 @@ private extension MapViewContent {
         circles.forEach { hasher.combine($0.id) }
         groundImages.forEach { hasher.combine($0.id) }
         rasterLayers.forEach { hasher.combine($0.id) }
+        // InfoBubble の増減で `updateContent` が走らないと、マーカーをタップしても
+        // バブルが同期されない（3D 側のフィンガープリントと同じく id を含める）。
+        infoBubbles.forEach { hasher.combine($0.id) }
         return hasher.finalize()
     }
+}
+
+private struct InfoBubbleContainerRepresentable2D: UIViewRepresentable {
+    let container: PassthroughContainerView
+
+    func makeUIView(context: Context) -> PassthroughContainerView { container }
+    func updateUIView(_ uiView: PassthroughContainerView, context: Context) {}
 }
 
 @MainActor
@@ -156,9 +192,64 @@ private final class ArcGISMapView2DModel: ObservableObject {
     private let circleLayer = GraphicsOverlay()
 
     private(set) var controller: ArcGISMapView2DController?
+
+    /// InfoBubble（およびマーカーのドロップ／バウンスアニメーション）を描くスクリーン空間の
+    /// コンテナ。3D 側 `ArcGISMapViewModel` と同じ構成。
+    let infoBubbleContainer = PassthroughContainerView()
+    private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
+    /// ArcGIS 2D はカメラ停止イベントを持たないため、`onViewpointChanged` の停止を
+    /// デバウンスして「停止」とみなし、そこで範囲制限を補正する（3D 側と同じ考え方、
+    /// android-for-arcgis の `cameraMoveEndDebounceMs` に対応）。
+    private var cameraRestrictionWorkItem: DispatchWorkItem?
+    private let cameraRestrictionDebounceSeconds = 0.18
     private var hullPolygonController: ArcGISPolygonOverlayController?
     private var overlayScope: MapOverlayScope?
     private var didBind = false
+
+    /// マーカークラスタリング等のプラグインへ公開する描画 capability。
+    ///
+    /// 3D 側（`ArcGISMapViewModel`）は独自にコントローラを持つ都合でモデル自身が
+    /// `MarkerRenderingSupport` を実装しているが、2D は Core の共通レイヤ
+    /// `StrategyMarkerManager` をそのまま使える（`ArcGISMarkerRenderer` は
+    /// `ArcGISMapContext` があれば動き、`ArcGISMapContainer2D` が準拠しているため）。
+    private lazy var strategyManager: StrategyMarkerManager<Graphic, ArcGISMarkerRenderer> = {
+        let manager = StrategyMarkerManager<Graphic, ArcGISMarkerRenderer>(
+            makeRenderer: { [weak self] _ in
+                guard let self else { fatalError("ArcGISMapView2DModel released") }
+                return ArcGISMarkerRenderer(markerLayer: self.markerLayer, container: self.container)
+            },
+            currentCamera: { [weak self] in self?.cameraPositionWithVisibleRegion() }
+        )
+        manager.onRendererCreated = { [weak self, weak manager] _ in
+            // find() を android と同じ画面空間判定にするため geo→screen 投影を注入する
+            // （3D 側の `markerProjector` 注入と同じ目的）。controller は
+            // onRendererCreated の時点で既に生成済み。
+            manager?.controller?.markerProjector = { [weak self] geo in
+                self?.container.screenPoint(fromLocation: geo.toArcGISPoint(spatialReference: .wgs84))
+            }
+        }
+        return manager
+    }()
+
+    /// ビューポートサイズを記録する。`visibleRegion` の算出に必須で、
+    /// 未設定だとクラスタリングが表示範囲を求められずクラスタが一切描画されない
+    /// （3D 側 `ArcGISMapViewModel.updateViewportSize` と同じ役割）。
+    func updateViewportSize(_ size: CGSize) {
+        container.viewportSize = size
+    }
+
+    /// クラスタ算出に必要な `visibleRegion` を付けた現在のカメラ。
+    private func cameraPositionWithVisibleRegion() -> MapCameraPosition {
+        let pos = container.lastCameraPosition
+        return MapCameraPosition(
+            position: pos.position,
+            zoom: pos.zoom,
+            bearing: pos.bearing,
+            tilt: pos.tilt,
+            paddings: pos.paddings,
+            visibleRegion: arcGISComputeVisibleRegion(for: pos, viewportSize: container.viewportSize)
+        )
+    }
     private var dragState: MarkerDragState2D = .idle
     /// 「1秒長押し → ドラッグ」ジェスチャでマーカーを掴んでいる間 true。
     private var holdDragActive = false
@@ -166,10 +257,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
     init(state: ArcGISMapViewState) {
         let map = ArcGIS.Map(basemapStyle: ArcGISDesign.toBasemapStyle(state.mapDesignType))
         let initialCenter = state.cameraPosition.position.toArcGISPoint(spatialReference: .wgs84)
-        let initialScale = ArcGISMapView2DController.zoomToScale(
-            state.cameraPosition.zoom,
-            latitude: state.cameraPosition.position.latitude
-        )
+        let initialScale = ArcGISMapView2DController.zoomToScale(state.cameraPosition.zoom)
         map.initialViewpoint = Viewpoint(center: initialCenter, scale: max(1, initialScale))
 
         self.container = ArcGISMapContainer2D(
@@ -185,11 +273,14 @@ private final class ArcGISMapView2DModel: ObservableObject {
 
     func updateViewpoint(_ viewpoint: Viewpoint?) {
         guard let viewpoint,
-              let center = viewpoint.targetGeometry as? Point else { return }
+              let rawCenter = viewpoint.targetGeometry as? Point else { return }
+        // Viewpoint の座標はマップの空間参照（既定では Web メルカトル）で返るため、
+        // そのまま緯度経度として扱うとメートル値になってしまう。WGS84 へ投影してから使う。
+        let center = rawCenter.projectedToWGS84()
         let lat = center.y
         let lon = center.x
         let scale = viewpoint.targetScale
-        let zoom = ArcGISMapView2DController.scaleToZoom(scale, latitude: lat)
+        let zoom = ArcGISMapView2DController.scaleToZoom(scale)
         let cameraPosition = MapCameraPosition(
             position: GeoPoint(latitude: lat, longitude: lon),
             zoom: zoom,
@@ -198,10 +289,37 @@ private final class ArcGISMapView2DModel: ObservableObject {
             paddings: MapPaddings.Zeros
         )
         controller?.notifyCameraMove(cameraPosition)
+        scheduleCameraRestrictionCorrection(cameraPosition)
+        // クラスタは visibleRegion.bounds を使うため、付与したカメラを渡す。
+        let cameraForCluster = MapCameraPosition(
+            position: cameraPosition.position,
+            zoom: cameraPosition.zoom,
+            bearing: cameraPosition.bearing,
+            tilt: cameraPosition.tilt,
+            paddings: cameraPosition.paddings,
+            visibleRegion: arcGISComputeVisibleRegion(for: cameraPosition, viewportSize: container.viewportSize)
+        )
+        Task { [weak self] in await self?.strategyManager.onCameraChanged(cameraForCluster) }
+    }
+
+    /// パンやズームが落ち着いてから 1 度だけ補正する。移動中に毎フレーム引き戻すと
+    /// ユーザーのジェスチャーと競合するため。
+    private func scheduleCameraRestrictionCorrection(_ cameraPosition: MapCameraPosition) {
+        cameraRestrictionWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            _ = self.controller?.applyCameraRestrictionCorrectionIfNeeded(cameraPosition)
+        }
+        cameraRestrictionWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + cameraRestrictionDebounceSeconds,
+            execute: workItem
+        )
     }
 
     func bind(
         state: ArcGISMapViewState,
+        cameraRestriction: CameraRestriction?,
         onMapClick: OnMapEventHandler?,
         onMapLongClick: OnMapEventHandler?,
         onCameraMoveStart: OnCameraMoveHandler?,
@@ -210,6 +328,13 @@ private final class ArcGISMapView2DModel: ObservableObject {
     ) {
         guard !didBind else { return }
         didBind = true
+
+        // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
+        // from the registry; this provider never learns that clustering exists.
+        // 再バインド時に前回の capability が残らないよう、登録前に空にする
+        // （android-for-arcgis の ArcGISMapView2D.kt と同じ）。
+        state.serviceRegistry.clear()
+        state.serviceRegistry.put(MarkerRenderingSupportKey.self, strategyManager)
 
         let holder = ArcGISMapView2DHolder(container: container)
         let raster = ArcGISRasterLayerController(map: container.map)
@@ -221,13 +346,16 @@ private final class ArcGISMapView2DModel: ObservableObject {
             markerController: ArcGISMarkerController(
                 markerLayer: markerLayer,
                 container: container,
-                onUpdateInfoBubble: { _ in }
+                onUpdateInfoBubble: { [weak self] id in
+                    self?.infoBubbleCoordinator?.updateInfoBubblePosition(for: id)
+                }
             ),
             polylineController: ArcGISPolylineOverlayController(polylineLayer: polylineLayer),
             polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: nil),
-            rasterLayerController: raster
+            rasterLayerController: raster,
+            strategyMarkerControllerProvider: { [weak self] in self?.strategyManager.controller }
         )
         self.controller = controller
 
@@ -240,6 +368,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
         bindOverlayCollector(overlayScope.groundImageCollector, to: controller.groundImageController)
 
         state.setController(controller)
+        // android-for-arcgis がコントローラ生成直後に setCameraRestriction するのと同じ位置。
+        controller.setCameraRestriction(cameraRestriction)
         state.setMapView2DHolder(controller.typedHolder)
         controller.setMapClickListener(listener: onMapClick)
         controller.setMapLongClickListener(listener: onMapLongClick)
@@ -247,9 +377,47 @@ private final class ArcGISMapView2DModel: ObservableObject {
         controller.setCameraMoveListener(listener: onCameraMove)
         controller.setCameraMoveEndListener(listener: onCameraMoveEnd)
         controller.setMapDesignTypeChangeListener(listener: { [weak state] value in state?.onMapDesignTypeChange(value: value) })
+
+        let markerController = controller.markerController
+        infoBubbleCoordinator = InfoBubbleOverlayCoordinator(
+            container: infoBubbleContainer,
+            project: { [weak self] point in
+                self?.container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
+            },
+            resolveMarkerStateForIcon: { [weak markerController] id, bubbleMarker in
+                markerController?.markerManager.getEntity(id)?.state ?? bubbleMarker
+            },
+            iconMetrics: { markerState in
+                let icon = (markerState.icon ?? DefaultMarkerIcon()).toBitmapIcon()
+                return MarkerIconMetrics(size: icon.size, anchor: icon.anchor, infoAnchor: icon.infoAnchor)
+            }
+        )
+
+        // Screen-space marker animation layer: shares the info-bubble
+        // container (inserted below the bubbles) and the same projection.
+        markerController.renderer.animationOverlay = MarkerAnimationOverlayCoordinator(
+            container: infoBubbleContainer,
+            project: { [weak self] point in
+                self?.container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
+            }
+        )
+    }
+
+    func syncInfoBubbles(_ bubbles: [InfoBubble]) {
+        infoBubbleCoordinator?.syncInfoBubbles(bubbles)
+    }
+
+    func updateInfoBubbleLayouts() {
+        infoBubbleCoordinator?.updateAllLayouts()
     }
 
     func unbind(state: ArcGISMapViewState) {
+        // クラスタ用レンダラ／コントローラも破棄する。
+        strategyManager.clear()
+        controller?.markerController.renderer.animationOverlay?.unbind()
+        controller?.markerController.renderer.animationOverlay = nil
+        infoBubbleCoordinator?.unbind()
+        infoBubbleCoordinator = nil
         dragState = .idle
         state.setController(nil as ArcGISMapView2DController?)
         state.setMapView2DHolder(nil)
@@ -348,6 +516,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
         overlayScope?.circleCollector.sync(content.circles.map { $0.state })
         overlayScope?.groundImageCollector.sync(content.groundImages.map { $0.state })
         overlayScope?.rasterLayerCollector.sync(content.rasterLayers.map { $0.state })
+        syncInfoBubbles(content.infoBubbles)
     }
 }
 
@@ -366,3 +535,19 @@ private enum ArcGISSdkInitialization2D {
         didInitialize = true
     }
 }
+
+/// ArcGIS drives 2D interaction through an allow-list. A 2D `MapView` has no
+/// camera pitch at all, so `tiltGesture` has nothing to switch off.
+private func arcGISInteractionModes(for ui: MapUISettings) -> MapViewInteractionModes {
+        MapUISettingsDiagnostics.warnIfRequested(
+            ui.tiltGesture,
+            gesture: .tilt,
+            provider: "ArcGIS (2D)",
+            reason: "a 2D map has no camera pitch"
+        )
+        var modes: MapViewInteractionModes = []
+        if ui.scrollGesture { modes.insert(.pan) }
+        if ui.zoomGesture { modes.insert(.zoom) }
+        if ui.rotateGesture { modes.insert(.rotate) }
+        return modes
+    }
