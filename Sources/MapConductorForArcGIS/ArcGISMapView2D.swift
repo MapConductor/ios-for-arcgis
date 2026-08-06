@@ -331,9 +331,6 @@ private final class ArcGISMapView2DModel: ObservableObject {
 
         // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
         // from the registry; this provider never learns that clustering exists.
-        // 再バインド時に前回の capability が残らないよう、登録前に空にする
-        // （android-for-arcgis の ArcGISMapView2D.kt と同じ）。
-        state.serviceRegistry.clear()
         state.serviceRegistry.put(MarkerRenderingSupportKey.self, strategyManager)
 
         let holder = ArcGISMapView2DHolder(container: container)
@@ -368,6 +365,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
         bindOverlayCollector(overlayScope.groundImageCollector, to: controller.groundImageController)
 
         state.setController(controller)
+        // 拡張モジュール（ヒートマップ等）がオーバーレイコントローラを登録できるようにする。
+        state.serviceRegistry.put(OverlayControllerRegistryKey.self, controller.overlayControllers)
         // android-for-arcgis がコントローラ生成直後に setCameraRestriction するのと同じ位置。
         controller.setCameraRestriction(cameraRestriction)
         state.setMapView2DHolder(controller.typedHolder)
@@ -412,6 +411,9 @@ private final class ArcGISMapView2DModel: ObservableObject {
     }
 
     func unbind(state: ArcGISMapViewState) {
+        // 登録した capability を取り下げる。レジストリの持ち主は state で、ビューより長生きするため、
+        // ここで外さないと破棄済みのコントローラを掴んだまま残る。
+        state.serviceRegistry.removeProviderRegistrations()
         // クラスタ用レンダラ／コントローラも破棄する。
         strategyManager.clear()
         controller?.markerController.renderer.animationOverlay?.unbind()
@@ -419,6 +421,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
         infoBubbleCoordinator?.unbind()
         infoBubbleCoordinator = nil
         dragState = .idle
+        // 登録済みオーバーレイコントローラ（拡張モジュール含む）を破棄する。
+        controller?.destroy()
         state.setController(nil as ArcGISMapView2DController?)
         state.setMapView2DHolder(nil)
         controller = nil

@@ -28,6 +28,7 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
     }
 
     override func createLayer(state: RasterLayerState) async -> Layer? {
+        RasterHeaderRuleSet.warnUnsupported(provider: "ArcGIS", state: state)
         guard let layer = makeLayer(from: state) else { return nil }
         apply(state: state, to: layer)
         if state.debug {

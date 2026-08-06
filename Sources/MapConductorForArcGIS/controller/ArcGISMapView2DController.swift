@@ -8,6 +8,11 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     let typedHolder: ArcGISMapView2DHolder
     let coroutine = CoroutineScope()
 
+    /// この地図に紐づくオーバーレイコントローラの登録簿。
+    /// 拡張モジュール（ヒートマップ、マーカークラスタリング等）がここに登録して
+    /// カメラ変更を受け取る。`MapViewControllerProtocol` の要件。
+    let overlayControllers = OverlayControllerRegistry()
+
     let markerController: ArcGISMarkerController
     let polylineController: ArcGISPolylineOverlayController
     let polygonController: ArcGISPolygonOverlayController
@@ -145,6 +150,8 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     }
 
     func notifyCameraMoveEnd(_ cameraPosition: MapCameraPosition) {
+        // 登録済みオーバーレイ（拡張モジュール含む）へ伝播する。
+        overlayControllers.dispatchCameraChanged(cameraPosition)
         typedHolder.mapView.lastCameraPosition = cameraPosition
         cameraMoveEndListener?(cameraPosition)
     }

@@ -361,9 +361,6 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
     ) {
         // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
         // from the registry; this provider never learns that clustering exists.
-        // 再バインド時に前回の capability が残らないよう、登録前に空にする
-        // （android-sdk の各 *MapView.kt が `registry.clear()` してから put するのと同じ）。
-        state.serviceRegistry.clear()
         state.serviceRegistry.put(MarkerRenderingSupportKey.self, self)
         if didBind {
             NSLog("[MapConductor][ArcGIS] bind skipped because model is already bound")
@@ -403,6 +400,8 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         bindOverlayCollector(overlayScope.groundImageCollector, to: controller.groundImageController)
 
         state.setController(controller)
+        // 拡張モジュール（ヒートマップ等）がオーバーレイコントローラを登録できるようにする。
+        state.serviceRegistry.put(OverlayControllerRegistryKey.self, controller.overlayControllers)
         // android-for-arcgis がコントローラ生成直後に setCameraRestriction するのと同じ位置。
         controller.setCameraRestriction(cameraRestriction)
         state.setSceneViewHolder(controller.typedHolder)
@@ -446,10 +445,15 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
     }
 
     func unbind(state: ArcGISMapViewState) {
+        // 登録した capability を取り下げる。レジストリの持ち主は state で、ビューより長生きするため、
+        // ここで外さないと破棄済みのコントローラを掴んだまま残る。
+        state.serviceRegistry.removeProviderRegistrations()
         NSLog("[MapConductor][ArcGIS] unbind begin")
         dragState = .idle
         controller?.markerController.renderer.animationOverlay?.unbind()
         controller?.markerController.renderer.animationOverlay = nil
+        // 登録済みオーバーレイコントローラ（拡張モジュール含む）を破棄する。
+        controller?.destroy()
         state.setController(nil as ArcGISMapViewController?)
         state.setSceneViewHolder(nil)
         controller = nil
