@@ -33,5 +33,9 @@ let package = Package(
                 .product(name: "ArcGIS", package: "arcgis-maps-sdk-swift"),
             ]
         ),
+        .testTarget(
+            name: "MapConductorForArcGISTests",
+            dependencies: ["MapConductorForArcGIS"]
+        ),
     ]
 )

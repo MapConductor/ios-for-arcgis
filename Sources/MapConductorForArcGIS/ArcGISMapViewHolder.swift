@@ -45,6 +45,10 @@ public final class ArcGISMapContainer2D {
     var lastCameraPosition: MapCameraPosition
     var viewportSize: CGSize?
 
+    /// `ArcGIS2DTiltModifier` が `MapView` を傾けている角度（0...60）。
+    /// マーカーを立てて見せるための縦補正に使う（`markerVerticalStretch`）。
+    var visualTiltDegrees: Double = 0
+
     init(
         map: ArcGIS.Map,
         graphicsOverlays: [GraphicsOverlay],

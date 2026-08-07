@@ -104,8 +104,13 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     func setMapInitializedListener(listener: OnMapInitializedHandler?) { mapInitializedListener = listener }
     func setMapDesignTypeChangeListener(listener: ArcGISDesignTypeChangeHandler?) { mapDesignTypeChangeListener = listener }
 
+    /// 論理 tilt が変わったことをビュー層へ伝える。2D はカメラピッチを持てないため、
+    /// `ArcGIS2DTiltModifier` が `MapView` 自体を傾けて見た目を作る。
+    var onVisualTiltChanged: ((Double) -> Void)?
+
     func moveCamera(position: MapCameraPosition) {
         typedHolder.mapView.lastCameraPosition = position
+        onVisualTiltChanged?(position.tilt)
         Task { @MainActor in
             let viewpoint = toViewpoint(position)
             _ = await typedHolder.mapView.proxy?.proxy.setViewpoint(viewpoint)
@@ -114,6 +119,7 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
 
     func animateCamera(position: MapCameraPosition, duration: Long) {
         typedHolder.mapView.lastCameraPosition = position
+        onVisualTiltChanged?(position.tilt)
         Task { @MainActor in
             let viewpoint = toViewpoint(position)
             cameraMoveStartListener?(position)
@@ -264,10 +270,16 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         markerController.handleDragEnd(at: nil)
     }
 
+    /// 2D `MapView` はカメラピッチを持てないため、tilt < 0（上向き）は中心の前進と
+    /// ズーム補正で近似する（`ArcGIS2DTiltEmulation`）。tilt >= 0 は他プロバイダと同じく
+    /// 指定位置がそのまま画面中心に来る。
     private func toViewpoint(_ position: MapCameraPosition) -> Viewpoint {
-        let point = position.position.toArcGISPoint(spatialReference: .wgs84)
-        let scale = ArcGISMapView2DController.zoomToScale(position.zoom)
-        return Viewpoint(center: point, scale: scale)
+        let shifted = ArcGIS2DTiltEmulation.shiftedCamera(for: position)
+        let point = shifted.center.toArcGISPoint(spatialReference: .wgs84)
+        let scale = ArcGISMapView2DController.zoomToScale(shifted.zoom)
+        // 2D MapView は回転をネイティブに扱えるので bearing はそのまま渡す
+        // （android-for-arcgis の `toViewpoint` と同じ 1:1 対応）。
+        return Viewpoint(center: point, scale: scale, rotation: position.bearing)
     }
 
     @MainActor

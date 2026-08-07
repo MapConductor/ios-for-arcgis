@@ -27,6 +27,11 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
 
     private static let tileSize = 256
 
+    /// 2D の tilt 表現が変わったときに、マーカーの縦補正を掛け直す。
+    func refreshVerticalStretch() {
+        renderer.refreshVerticalStretch()
+    }
+
     init(
         markerLayer: GraphicsOverlay,
         container: any ArcGISMapContext,

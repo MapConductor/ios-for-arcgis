@@ -150,6 +150,7 @@ private struct ArcGISMapView2DBody: View {
             .task(id: content.identityFingerprint) {
                 await model.updateContent(content)
             }
+            .arcGIS2DTilt(model.visualTilt)
             }
 
             // InfoBubble を載せるパススルーコンテナ。地図の上に重ね、バブル以外の
@@ -192,6 +193,13 @@ private final class ArcGISMapView2DModel: ObservableObject {
     private let circleLayer = GraphicsOverlay()
 
     private(set) var controller: ArcGISMapView2DController?
+
+    /// `MapView` を見た目だけ傾けるための論理 tilt。
+    ///
+    /// `state.cameraPosition` はカメラ操作の経路によっては更新されないため、コントローラの
+    /// `moveCamera` / `animateCamera` から直接受け取る（android-for-arcgis が
+    /// `WrapMapView.visualTilt` を同じ場所で更新しているのと対応）。
+    @Published var visualTilt: Double = 0
 
     /// InfoBubble（およびマーカーのドロップ／バウンスアニメーション）を描くスクリーン空間の
     /// コンテナ。3D 側 `ArcGISMapViewModel` と同じ構成。
@@ -256,9 +264,15 @@ private final class ArcGISMapView2DModel: ObservableObject {
 
     init(state: ArcGISMapViewState) {
         let map = ArcGIS.Map(basemapStyle: ArcGISDesign.toBasemapStyle(state.mapDesignType))
-        let initialCenter = state.cameraPosition.position.toArcGISPoint(spatialReference: .wgs84)
-        let initialScale = ArcGISMapView2DController.zoomToScale(state.cameraPosition.zoom)
-        map.initialViewpoint = Viewpoint(center: initialCenter, scale: max(1, initialScale))
+        // 初期カメラも moveCamera と同じく tilt の擬似表現を通す（`ArcGIS2DTiltEmulation`）。
+        let initialShifted = ArcGIS2DTiltEmulation.shiftedCamera(for: state.cameraPosition)
+        let initialCenter = initialShifted.center.toArcGISPoint(spatialReference: .wgs84)
+        let initialScale = ArcGISMapView2DController.zoomToScale(initialShifted.zoom)
+        map.initialViewpoint = Viewpoint(
+            center: initialCenter,
+            scale: max(1, initialScale),
+            rotation: state.cameraPosition.bearing
+        )
 
         self.container = ArcGISMapContainer2D(
             map: map,
@@ -281,11 +295,25 @@ private final class ArcGISMapView2DModel: ObservableObject {
         let lon = center.x
         let scale = viewpoint.targetScale
         let zoom = ArcGISMapView2DController.scaleToZoom(scale)
-        let cameraPosition = MapCameraPosition(
-            position: GeoPoint(latitude: lat, longitude: lon),
+        // 2D はカメラピッチを持てないため tilt は擬似表現（`ArcGIS2DTiltEmulation`）。
+        // 直近に要求した論理カメラを手掛かりに、tilt < 0 で前進させた中心とズームを巻き戻し、
+        // 論理 tilt をそのまま返す。tilt >= 0 なら素通し。
+        let logical = container.lastCameraPosition
+        // 回転は 2D MapView がネイティブに持つので、実際の Viewpoint から読む
+        // （android-for-arcgis の `mapRotation` 読み出しと同じ 0..<360 正規化）。
+        let bearing = (viewpoint.rotation.truncatingRemainder(dividingBy: 360) + 360)
+            .truncatingRemainder(dividingBy: 360)
+        let restored = ArcGIS2DTiltEmulation.restoreLogicalCamera(
+            center: GeoPoint(latitude: lat, longitude: lon),
             zoom: zoom,
-            bearing: 0,
-            tilt: 0,
+            bearing: bearing,
+            logicalTilt: logical.tilt
+        )
+        let cameraPosition = MapCameraPosition(
+            position: restored.position,
+            zoom: restored.zoom,
+            bearing: bearing,
+            tilt: logical.tilt,
             paddings: MapPaddings.Zeros
         )
         controller?.notifyCameraMove(cameraPosition)
@@ -355,6 +383,14 @@ private final class ArcGISMapView2DModel: ObservableObject {
             strategyMarkerControllerProvider: { [weak self] in self?.strategyManager.controller }
         )
         self.controller = controller
+        controller.onVisualTiltChanged = { [weak self] tilt in
+            guard let self else { return }
+            self.visualTilt = tilt
+            // ビューを傾けると地図の中身は縦に潰れる。マーカーだけは立って見えるよう、
+            // アイコンを先に縦へ引き伸ばしておく（他のオーバーレイは寝たままでよい）。
+            self.container.visualTiltDegrees = tilt
+            controller.markerController.refreshVerticalStretch()
+        }
 
         let overlayScope = MapOverlayScope()
         self.overlayScope = overlayScope

@@ -256,6 +256,12 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
         )
         graphic.setAttributeValue(state.id, forKey: "id")
         graphic.setAttributeValue(state.zIndex ?? 0, forKey: "zIndex")
+        // 縦補正の掛け直しに使う素の寸法（tilt が変わるたびにここから再計算する）。
+        graphic.setAttributeValue(Double(bitmapIcon.size.height), forKey: Self.baseHeightKey)
+        graphic.setAttributeValue(
+            (bitmapIcon.anchor.y - 0.5) * Double(bitmapIcon.size.height),
+            forKey: Self.baseOffsetYKey
+        )
         graphic.isVisible = state.getAnimation() == nil
         return graphic
     }
@@ -266,8 +272,34 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
         symbol.height = Double(bitmapIcon.size.height)
         symbol.offsetX = (0.5 - bitmapIcon.anchor.x) * bitmapIcon.size.width
         symbol.offsetY = (bitmapIcon.anchor.y - 0.5) * bitmapIcon.size.height
+        applyVerticalStretch(to: symbol, baseHeight: symbol.height, baseOffsetY: symbol.offsetY)
         return symbol
     }
+
+    /// 2D の tilt 表現でビューが縦に潰れるぶんを、マーカーだけ先に引き伸ばして打ち消す。
+    /// アンカーが地面の位置からずれないよう `offsetY` も同じ倍率で補正する。
+    private func applyVerticalStretch(to symbol: PictureMarkerSymbol, baseHeight: Double, baseOffsetY: Double) {
+        let stretch = container?.markerVerticalStretch ?? 1.0
+        symbol.height = baseHeight * stretch
+        symbol.offsetY = baseOffsetY * stretch
+    }
+
+    /// tilt が変わったときに、既存マーカーの縦補正を掛け直す。
+    ///
+    /// 元の高さ・オフセットは生成時に属性へ控えてあるので、そこから毎回作り直す
+    /// （倍率を累積させない）。
+    func refreshVerticalStretch() {
+        for graphic in markerLayer.graphics {
+            guard let symbol = graphic.symbol as? PictureMarkerSymbol,
+                  let baseHeight = graphic.attributes[Self.baseHeightKey] as? Double,
+                  let baseOffsetY = graphic.attributes[Self.baseOffsetYKey] as? Double
+            else { continue }
+            applyVerticalStretch(to: symbol, baseHeight: baseHeight, baseOffsetY: baseOffsetY)
+        }
+    }
+
+    static let baseHeightKey = "mcBaseHeight"
+    static let baseOffsetYKey = "mcBaseOffsetY"
 
     private static func animationStartY(in bounds: CGRect) -> CGFloat {
         -max(32.0, bounds.height * 0.2)
