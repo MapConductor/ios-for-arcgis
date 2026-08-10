@@ -345,6 +345,15 @@ private final class ArcGISMapView2DModel: ObservableObject {
         )
     }
 
+
+    /// ``MapViewCoordinatorBase/screenProjectionGate(feature:)`` と同じもの。
+    /// ArcGIS のビューモデルは `MapViewCoordinatorBase` を継承していないので自前で持つ。
+    static func screenProjectionGate(state: ArcGISMapViewState, feature: String) -> () -> Bool {
+        let registry = state.serviceRegistry
+        let provider = String(describing: type(of: state))
+        return { ScreenProjectionRequirement.check(registry: registry, provider: provider, feature: feature) }
+    }
+
     func bind(
         state: ArcGISMapViewState,
         cameraRestriction: CameraRestriction?,
@@ -419,6 +428,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
             project: { [weak self] point in
                 self?.container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
             },
+            projectionGate: Self.screenProjectionGate(state: state, feature: "InfoBubble"),
             resolveMarkerStateForIcon: { [weak markerController] id, bubbleMarker in
                 markerController?.markerManager.getEntity(id)?.state ?? bubbleMarker
             },
@@ -434,7 +444,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
             container: infoBubbleContainer,
             project: { [weak self] point in
                 self?.container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
-            }
+            },
+            projectionGate: Self.screenProjectionGate(state: state, feature: "marker animation overlay")
         )
     }
 
