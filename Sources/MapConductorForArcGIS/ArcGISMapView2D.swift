@@ -401,6 +401,14 @@ private final class ArcGISMapView2DModel: ObservableObject {
             controller.markerController.refreshVerticalStretch()
         }
 
+        // クリックカスケードとスロット解決がここから kind で引く。
+        // **登録を忘れるとタップに反応しなくなる。**
+        controller.registerOverlayController(controller.markerController)
+        controller.registerOverlayController(controller.circleController)
+        controller.registerOverlayController(controller.polylineController)
+        controller.registerOverlayController(controller.polygonController)
+        controller.registerOverlayController(controller.groundImageController)
+
         let overlayScope = MapOverlayScope()
         self.overlayScope = overlayScope
         bindOverlayCollector(overlayScope.circleCollector, to: controller.circleController)

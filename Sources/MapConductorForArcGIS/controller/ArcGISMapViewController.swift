@@ -250,20 +250,10 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
             return true
         }
         
-        if let circle = circleController.find(position: touchPosition) {
-            circleController.dispatchClick(event: CircleEvent(state: circle.state, clicked: touchPosition))
-            return true
-        }
-        if let groundImage = groundImageController.find(position: touchPosition) {
-            groundImageController.dispatchClick(event: GroundImageEvent(state: groundImage.state, clicked: touchPosition))
-            return true
-        }
-        if let hit = polylineController.findWithClosestPoint(position: touchPosition) {
-            polylineController.dispatchClick(event: PolylineEvent(state: hit.entity.state, clicked: hit.closestPoint))
-            return true
-        }
-        if let polygon = polygonController.find(position: touchPosition) {
-            polygonController.dispatchClick(event: PolygonEvent(state: polygon.state, clicked: touchPosition))
+        // circle → groundImage → polyline → polygon の一本道。
+        // 順序と先勝ちはコアの dispatchOverlayTap が持つ。
+        // ここは移行前から正準順どおりだったので、順序の変更は無い。
+        if dispatchOverlayTap(position: touchPosition) {
             return true
         }
         notifyMapClick(touchPosition)
