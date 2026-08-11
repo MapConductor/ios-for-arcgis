@@ -23,6 +23,14 @@ enum ArcGIS2DTiltEmulation {
     static let targetDistanceScale = 1.83
     static let zoomOffsetAtMaxTilt = -0.9
 
+    /// 回した平面が元のフレームを覆うための拡大率。
+    ///
+    /// 正射影なら回した後の高さは `planeScale * cos(tilt)` なので、最大 60° でちょうど
+    /// 1.0 になる 2.0 が最小値。react-for-leaflet / react-for-openlayers の 200% と同じ。
+    /// `ArcGIS2DTiltModifier`（描画）と `ArcGISMapContainer2D.fromInnerToSurface`
+    /// （座標の畳み込み）の両方が参照するのでここに置く。
+    static let planeScale: CGFloat = 2.0
+
     /// 高度の算出にはプラットフォーム非依存の既定値（Google Maps 較正）を使う。
     ///
     /// `ArcGISZoomAltitudeConverter` の既定値（iOS 141_600_000 / Android 136_500_000）は

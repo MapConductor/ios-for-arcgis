@@ -21,27 +21,32 @@ struct ArcGIS2DTiltModifier: ViewModifier {
     /// 論理 tilt（度）。符号は無視し、0...60 にクランプして描画角度に使う。
     let tilt: Double
 
-    /// 回した平面が元のフレームを覆うための拡大率。
-    ///
-    /// 正射影なら回した後の高さは `planeScale * cos(tilt)` なので、最大 60° でちょうど 1.0 に
-    /// なる 2.0 が最小値。react-for-leaflet / react-for-openlayers の 200% と同じ。
-    private let planeScale: CGFloat = 2.0
-
     /// 遠近は掛けない（正射影）。
     ///
     /// react-for-leaflet / react-for-openlayers の CSS も `perspective` を置いておらず、
-    /// ``planeScale`` = 1 / cos(60°) がちょうど効く前提になっている。遠近を入れると遠方が
+    /// `planeScale` = 1 / cos(60°) がちょうど効く前提になっている。遠近を入れると遠方が
     /// 縮んで平面が上辺を覆えなくなる。
     private let perspective: CGFloat = 0
 
     private var angle: Double { min(max(abs(tilt), 0.0), 60.0) }
 
+    /// **傾いていないときは拡大しない**（`OpenMobileMapsMapSurface.applyVisualTilt` と同じ）。
+    ///
+    /// tilt = 0 でも常に 200% にしていたことがあり、3 つの症状が同時に出た。
+    ///  - 内側の `MapView` の座標系が入れ物と半画面ぶんずれ、`screenPoint` を素で使う
+    ///    InfoBubble・マーカーアニメが**タップからかなり離れた位置**に出る
+    ///  - Esri の帰属表示バーが拡大ビューの下端（＝可視域の外）へ押し出されて**見えない**
+    ///  - `viewportSize` が 2 倍で記録され、`visibleRegion` が実際の 4 倍の面積になる
+    ///
+    /// 傾いているあいだの座標のずれは `ArcGISMapContainer2D.fromInnerToSurface` が畳む。
+    private var scale: CGFloat { angle > 0 ? ArcGIS2DTiltEmulation.planeScale : 1.0 }
+
     func body(content: Content) -> some View {
         GeometryReader { geometry in
             content
                 .frame(
-                    width: geometry.size.width * planeScale,
-                    height: geometry.size.height * planeScale
+                    width: geometry.size.width * scale,
+                    height: geometry.size.height * scale
                 )
                 .rotation3DEffect(
                     .degrees(angle),

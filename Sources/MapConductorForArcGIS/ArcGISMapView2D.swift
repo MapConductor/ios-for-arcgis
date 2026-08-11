@@ -112,7 +112,6 @@ private struct ArcGISMapView2DBody: View {
                     model.handleDragInteractionEnded()
                 }
             }
-            .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
             // マーカードラッグは「1秒長押し → ドラッグ」。ArcGIS の onLongPressGesture /
             // onDragGesture は排他で長押し後にドラッグが発火しないため、単一の SwiftUI
             // シーケンスジェスチャを使う（ArcGIS 専用モディファイアの後に置く必要がある）。
@@ -151,6 +150,10 @@ private struct ArcGISMapView2DBody: View {
                 await model.updateContent(content)
             }
             .arcGIS2DTilt(model.visualTilt)
+            // ビューポートは**傾きモディファイアの外側**で測ること。内側で測ると
+            // 傾いているあいだ planeScale 倍の大きさが記録され、`visibleRegion` が
+            // 実際に見えている範囲の何倍にもなる（座標の畳み込みの基準もここに合わせてある）。
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
             }
 
             // InfoBubble を載せるパススルーコンテナ。地図の上に重ね、バブル以外の
@@ -431,10 +434,16 @@ private final class ArcGISMapView2DModel: ObservableObject {
         controller.setMapDesignTypeChangeListener(listener: { [weak state] value in state?.onMapDesignTypeChange(value: value) })
 
         let markerController = controller.markerController
+        // 投影は**必ず入れ物の座標へ畳む**こと。`container.screenPoint` は内側の
+        // `MapView` の座標を返し、傾いているとき（と、かつて常時 200% だったとき）は
+        // 入れ物と食い違う。素で使うと InfoBubble がタップからかなり離れた位置に出る。
         infoBubbleCoordinator = InfoBubbleOverlayCoordinator(
             container: infoBubbleContainer,
             project: { [weak self] point in
-                self?.container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
+                guard let container = self?.container,
+                      let inner = container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
+                else { return nil }
+                return container.fromInnerToSurface(inner)
             },
             projectionGate: Self.screenProjectionGate(state: state, feature: "InfoBubble"),
             resolveMarkerStateForIcon: { [weak markerController] id, bubbleMarker in
@@ -451,7 +460,10 @@ private final class ArcGISMapView2DModel: ObservableObject {
         markerController.renderer.animationOverlay = MarkerAnimationOverlayCoordinator(
             container: infoBubbleContainer,
             project: { [weak self] point in
-                self?.container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
+                guard let container = self?.container,
+                      let inner = container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
+                else { return nil }
+                return container.fromInnerToSurface(inner)
             },
             projectionGate: Self.screenProjectionGate(state: state, feature: "marker animation overlay")
         )
