@@ -12,7 +12,8 @@ let coreDependency: Package.Dependency = usingLocalCore
 let package = Package(
     name: "mapconductor-for-arcgis",
     platforms: [
-        .iOS(.v17),
+        // ArcGIS Maps SDK for Swift 300.x requires iOS 18.
+        .iOS("18.0"),
     ],
     products: [
         .library(
@@ -23,7 +24,7 @@ let package = Package(
     ],
     dependencies: [
         coreDependency,
-        .package(url: "https://github.com/Esri/arcgis-maps-sdk-swift", from: "200.8.0"),
+        .package(url: "https://github.com/Esri/arcgis-maps-sdk-swift", from: "300.1.0"),
     ],
     targets: [
         .target(
