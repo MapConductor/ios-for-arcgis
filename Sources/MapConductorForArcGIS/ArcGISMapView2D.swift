@@ -216,6 +216,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
     private var hullPolygonController: ArcGISPolygonOverlayController?
     private var overlayScope: MapOverlayScope?
     private var didBind = false
+    /// タイル方式マーカーのラスターレイヤ（3D の同名プロパティと同じ役割）。
+    private var currentMarkerTileRasterLayer: RasterLayerState?
 
     /// マーカークラスタリング等のプラグインへ公開する描画 capability。
     ///
@@ -434,6 +436,12 @@ private final class ArcGISMapView2DModel: ObservableObject {
         controller.setMapDesignTypeChangeListener(listener: { [weak state] value in state?.onMapDesignTypeChange(value: value) })
 
         let markerController = controller.markerController
+        // タイル方式マーカーの受け口（3D の ArcGISMapView.bind と同じ配線）。
+        // ここが無いと updateTileLayer が作った RasterLayerState は捨てられ、
+        // タイル担当のマーカーが地図に載らない。
+        markerController.markerTileRasterLayerCallback = { [weak self] state in
+            self?.currentMarkerTileRasterLayer = state
+        }
         // 投影は**必ず入れ物の座標へ畳む**こと。`container.screenPoint` は内側の
         // `MapView` の座標を返し、傾いているとき（と、かつて常時 200% だったとき）は
         // 入れ物と食い違う。素で使うと InfoBubble がタップからかなり離れた位置に出る。
@@ -573,9 +581,11 @@ private final class ArcGISMapView2DModel: ObservableObject {
 
     func updateContent(_ content: MapViewContent) async {
         guard let controller else { return }
-        await controller.markerController.clear()
-        let markers = content.markers.map(\.state)
-        await controller.markerController.add(data: markers)
+        // 3D (ArcGISMapView.updateContent) と同じ並び。tilingOptions を渡さないと
+        // 大量マーカーのページで全件が既定のタイル担当（minMarkerCount=2000）に降格され、
+        // かつタイルレイヤの受け口も無いため**何も表示されない**（postoffice で顕在化）。
+        controller.markerController.tilingOptions = content.markerTilingOptions
+        await controller.markerController.syncMarkers(content.markers)
         overlayScope?.polylineCollector.sync(content.polylines.map { $0.state })
         overlayScope?.polygonCollector.sync(content.polygons.map { $0.state })
         for handler in content.polygonSyncHandlers {
@@ -586,7 +596,12 @@ private final class ArcGISMapView2DModel: ObservableObject {
         }
         overlayScope?.circleCollector.sync(content.circles.map { $0.state })
         overlayScope?.groundImageCollector.sync(content.groundImages.map { $0.state })
-        overlayScope?.rasterLayerCollector.sync(content.rasterLayers.map { $0.state })
+        // タイル方式マーカーのラスターレイヤを content のレイヤに合流させる
+        // （syncMarkers が先。その中で markerTileRasterLayerCallback が発火して
+        // currentMarkerTileRasterLayer が更新される）。
+        let tileLayer = currentMarkerTileRasterLayer.map { RasterLayer(state: $0) }
+        let allRasterLayers = content.rasterLayers + (tileLayer.map { [$0] } ?? [])
+        overlayScope?.rasterLayerCollector.sync(allRasterLayers.map { $0.state })
         syncInfoBubbles(content.infoBubbles)
     }
 }
