@@ -112,7 +112,6 @@ private struct ArcGISMapView2DBody: View {
                     model.handleDragInteractionEnded()
                 }
             }
-            .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
             // マーカードラッグは「1秒長押し → ドラッグ」。ArcGIS の onLongPressGesture /
             // onDragGesture は排他で長押し後にドラッグが発火しないため、単一の SwiftUI
             // シーケンスジェスチャを使う（ArcGIS 専用モディファイアの後に置く必要がある）。
@@ -151,6 +150,10 @@ private struct ArcGISMapView2DBody: View {
                 await model.updateContent(content)
             }
             .arcGIS2DTilt(model.visualTilt)
+            // ビューポートは**傾きモディファイアの外側**で測ること。内側で測ると
+            // 傾いているあいだ planeScale 倍の大きさが記録され、`visibleRegion` が
+            // 実際に見えている範囲の何倍にもなる（座標の畳み込みの基準もここに合わせてある）。
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
             }
 
             // InfoBubble を載せるパススルーコンテナ。地図の上に重ね、バブル以外の
@@ -213,6 +216,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
     private var hullPolygonController: ArcGISPolygonOverlayController?
     private var overlayScope: MapOverlayScope?
     private var didBind = false
+    /// タイル方式マーカーのラスターレイヤ（3D の同名プロパティと同じ役割）。
+    private var currentMarkerTileRasterLayer: RasterLayerState?
 
     /// マーカークラスタリング等のプラグインへ公開する描画 capability。
     ///
@@ -345,6 +350,15 @@ private final class ArcGISMapView2DModel: ObservableObject {
         )
     }
 
+
+    /// ``MapViewCoordinatorBase/screenProjectionGate(feature:)`` と同じもの。
+    /// ArcGIS のビューモデルは `MapViewCoordinatorBase` を継承していないので自前で持つ。
+    static func screenProjectionGate(state: ArcGISMapViewState, feature: String) -> () -> Bool {
+        let registry = state.serviceRegistry
+        let provider = String(describing: type(of: state))
+        return { ScreenProjectionRequirement.check(registry: registry, provider: provider, feature: feature) }
+    }
+
     func bind(
         state: ArcGISMapViewState,
         cameraRestriction: CameraRestriction?,
@@ -392,6 +406,14 @@ private final class ArcGISMapView2DModel: ObservableObject {
             controller.markerController.refreshVerticalStretch()
         }
 
+        // クリックカスケードとスロット解決がここから kind で引く。
+        // **登録を忘れるとタップに反応しなくなる。**
+        controller.registerOverlayController(controller.markerController)
+        controller.registerOverlayController(controller.circleController)
+        controller.registerOverlayController(controller.polylineController)
+        controller.registerOverlayController(controller.polygonController)
+        controller.registerOverlayController(controller.groundImageController)
+
         let overlayScope = MapOverlayScope()
         self.overlayScope = overlayScope
         bindOverlayCollector(overlayScope.circleCollector, to: controller.circleController)
@@ -414,11 +436,24 @@ private final class ArcGISMapView2DModel: ObservableObject {
         controller.setMapDesignTypeChangeListener(listener: { [weak state] value in state?.onMapDesignTypeChange(value: value) })
 
         let markerController = controller.markerController
+        // タイル方式マーカーの受け口（3D の ArcGISMapView.bind と同じ配線）。
+        // ここが無いと updateTileLayer が作った RasterLayerState は捨てられ、
+        // タイル担当のマーカーが地図に載らない。
+        markerController.markerTileRasterLayerCallback = { [weak self] state in
+            self?.currentMarkerTileRasterLayer = state
+        }
+        // 投影は**必ず入れ物の座標へ畳む**こと。`container.screenPoint` は内側の
+        // `MapView` の座標を返し、傾いているとき（と、かつて常時 200% だったとき）は
+        // 入れ物と食い違う。素で使うと InfoBubble がタップからかなり離れた位置に出る。
         infoBubbleCoordinator = InfoBubbleOverlayCoordinator(
             container: infoBubbleContainer,
             project: { [weak self] point in
-                self?.container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
+                guard let container = self?.container,
+                      let inner = container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
+                else { return nil }
+                return container.fromInnerToSurface(inner)
             },
+            projectionGate: Self.screenProjectionGate(state: state, feature: "InfoBubble"),
             resolveMarkerStateForIcon: { [weak markerController] id, bubbleMarker in
                 markerController?.markerManager.getEntity(id)?.state ?? bubbleMarker
             },
@@ -433,8 +468,12 @@ private final class ArcGISMapView2DModel: ObservableObject {
         markerController.renderer.animationOverlay = MarkerAnimationOverlayCoordinator(
             container: infoBubbleContainer,
             project: { [weak self] point in
-                self?.container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
-            }
+                guard let container = self?.container,
+                      let inner = container.screenPoint(fromLocation: point.toArcGISPoint(spatialReference: .wgs84))
+                else { return nil }
+                return container.fromInnerToSurface(inner)
+            },
+            projectionGate: Self.screenProjectionGate(state: state, feature: "marker animation overlay")
         )
     }
 
@@ -542,9 +581,11 @@ private final class ArcGISMapView2DModel: ObservableObject {
 
     func updateContent(_ content: MapViewContent) async {
         guard let controller else { return }
-        await controller.markerController.clear()
-        let markers = content.markers.map(\.state)
-        await controller.markerController.add(data: markers)
+        // 3D (ArcGISMapView.updateContent) と同じ並び。tilingOptions を渡さないと
+        // 大量マーカーのページで全件が既定のタイル担当（minMarkerCount=2000）に降格され、
+        // かつタイルレイヤの受け口も無いため**何も表示されない**（postoffice で顕在化）。
+        controller.markerController.tilingOptions = content.markerTilingOptions
+        await controller.markerController.syncMarkers(content.markers)
         overlayScope?.polylineCollector.sync(content.polylines.map { $0.state })
         overlayScope?.polygonCollector.sync(content.polygons.map { $0.state })
         for handler in content.polygonSyncHandlers {
@@ -555,7 +596,12 @@ private final class ArcGISMapView2DModel: ObservableObject {
         }
         overlayScope?.circleCollector.sync(content.circles.map { $0.state })
         overlayScope?.groundImageCollector.sync(content.groundImages.map { $0.state })
-        overlayScope?.rasterLayerCollector.sync(content.rasterLayers.map { $0.state })
+        // タイル方式マーカーのラスターレイヤを content のレイヤに合流させる
+        // （syncMarkers が先。その中で markerTileRasterLayerCallback が発火して
+        // currentMarkerTileRasterLayer が更新される）。
+        let tileLayer = currentMarkerTileRasterLayer.map { RasterLayer(state: $0) }
+        let allRasterLayers = content.rasterLayers + (tileLayer.map { [$0] } ?? [])
+        overlayScope?.rasterLayerCollector.sync(allRasterLayers.map { $0.state })
         syncInfoBubbles(content.infoBubbles)
     }
 }
