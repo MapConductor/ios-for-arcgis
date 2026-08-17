@@ -10,6 +10,17 @@ Even using the wrapper API, you can still access the native ArcGIS view if you w
 
 https://mapconductor.com/setup/ios/arcgis/
 
+### API key
+
+This module ships an initialiser. Call it once, before the first map:
+
+```swift
+_ = arcGISApiKeyInitialize(apiKey: arcGISApiKey)
+```
+
+Esri basemaps need the key; the OSM-based designs work without one. Read the
+value from your build configuration rather than committing it.
+
 ## Usage
 
 ```swift
