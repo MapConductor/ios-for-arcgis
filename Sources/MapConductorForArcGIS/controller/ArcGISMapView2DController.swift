@@ -1,7 +1,7 @@
 import ArcGIS
 import CoreGraphics
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 final class ArcGISMapView2DController: MapViewControllerProtocol {
     let holder: AnyMapViewHolder
@@ -269,7 +269,9 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         let scale = ArcGISMapView2DController.zoomToScale(shifted.zoom)
         // 2D MapView は回転をネイティブに扱えるので bearing はそのまま渡す
         // （android-for-arcgis の `toViewpoint` と同じ 1:1 対応）。
-        return Viewpoint(center: point, scale: scale, rotation: position.bearing)
+        // ArcGIS Runtime の Viewpoint.rotation は反時計回り、つまりカメラの heading と
+        // 同じ向き（JS の MapView.rotation とは逆）。ArcGISMapView2D の initialViewpoint も同じ。
+        return Viewpoint(center: point, scale: scale, rotation: CameraBearing.toNativeHeading(position.bearing))
     }
 
     @MainActor
