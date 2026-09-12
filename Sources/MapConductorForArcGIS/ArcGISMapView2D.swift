@@ -1,7 +1,7 @@
 import ArcGIS
 import Combine
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 import SwiftUI
 
 public struct ArcGISMapView2D: View {
@@ -276,7 +276,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
         map.initialViewpoint = Viewpoint(
             center: initialCenter,
             scale: max(1, initialScale),
-            rotation: state.cameraPosition.bearing
+            rotation: CameraBearing.toNativeHeading(state.cameraPosition.bearing)
         )
 
         self.container = ArcGISMapContainer2D(
@@ -306,8 +306,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
         let logical = container.lastCameraPosition
         // 回転は 2D MapView がネイティブに持つので、実際の Viewpoint から読む
         // （android-for-arcgis の `mapRotation` 読み出しと同じ 0..<360 正規化）。
-        let bearing = (viewpoint.rotation.truncatingRemainder(dividingBy: 360) + 360)
-            .truncatingRemainder(dividingBy: 360)
+        let bearing = CameraBearing.bearingFromNativeHeading(viewpoint.rotation)
         let restored = ArcGIS2DTiltEmulation.restoreLogicalCamera(
             center: GeoPoint(latitude: lat, longitude: lon),
             zoom: zoom,

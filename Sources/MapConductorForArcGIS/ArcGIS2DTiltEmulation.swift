@@ -1,5 +1,5 @@
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 /// ArcGIS の 2D `MapView` 向けの tilt 擬似表現。
 ///
@@ -69,7 +69,7 @@ enum ArcGIS2DTiltEmulation {
         let target = Spherical.computeOffset(
             origin: position.position,
             distance: distanceForward,
-            heading: position.bearing
+            heading: CameraBearing.toNativeHeading(position.bearing)
         )
         return (target, zoom)
     }
@@ -101,7 +101,7 @@ enum ArcGIS2DTiltEmulation {
         let originalPosition = Spherical.computeOffset(
             origin: center,
             distance: distanceBackward,
-            heading: bearing + 180.0
+            heading: CameraBearing.toNativeHeading(bearing) + 180.0
         )
         return (originalPosition, originalZoom)
     }

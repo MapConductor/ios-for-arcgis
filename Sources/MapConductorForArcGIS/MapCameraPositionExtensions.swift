@@ -1,6 +1,6 @@
 import ArcGIS
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 private let arcGISCameraConverter = ArcGISZoomAltitudeConverter()
 private let earthMeanRadiusMeters = 6_371_000.0
@@ -24,7 +24,7 @@ public extension MapCameraPosition {
         return calculateCameraForOrbitParameters(
             targetPoint: targetPoint,
             distance: distance,
-            cameraHeadingOffset: bearing + 180,
+            cameraHeadingOffset: CameraBearing.toNativeHeading(bearing) + 180,
             cameraPitchOffset: tilt
         )
     }
@@ -123,7 +123,7 @@ public extension Camera {
         return MapCameraPosition(
             position: GeoPoint(latitude: target.latitude, longitude: target.longitude, altitude: altitude),
             zoom: arcGISCameraConverter.altitudeToZoomLevel(altitude: altitude, latitude: target.latitude, tilt: tiltForZoom, viewportWidthPx: width, viewportHeightPx: height),
-            bearing: ((heading.truncatingRemainder(dividingBy: 360)) + 360).truncatingRemainder(dividingBy: 360),
+            bearing: CameraBearing.bearingFromNativeHeading(heading),
             tilt: logicalTilt,
             visibleRegion: visibleRegion
         )
