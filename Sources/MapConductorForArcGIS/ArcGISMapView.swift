@@ -371,15 +371,12 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
         // from the registry; this provider never learns that clustering exists.
         state.serviceRegistry.put(MarkerRenderingSupportKey.self, self)
-        // この画面は 3D の SceneView で、**タイルは 256px** という前提でレベルを
-        // 選ぶ。512px のタイルを渡すと 1 段深いレベルを 4 倍の枚数で引く
-        // （Android 実機・統一ズーム 12 で、2D は z=11、3D は z=12）。絵は正しい
-        // ので気づきにくいぶん、供給側が知れるように宣言しておく。2D の
-        // `ArcGISMapView2D` は好みが無いので登録しない。
-        state.serviceRegistry.put(
-            RasterTilePreferenceKey.self,
-            FixedRasterTilePreference(preferredTileSize: 256)
-        )
+        // ここで 256 を宣言したいが、まだできない。3D の SceneView は
+        // 「タイルは 256px」という前提でレベルを選ぶので 512px を渡すと 1 段深い
+        // レベルを 4 倍の枚数で引くが、ベクタータイルのラスタライザ（mvt-render）
+        // が**タイルは 512dp で表示される**前提のため、SceneView の 256dp 枠では
+        // 文字も線も半分の大きさになる。ラスタライザが表示 dp を受け取れるように
+        // なるまで宣言しない（詳細は RasterTilePreference のコメント）。
         if didBind {
             NSLog("[MapConductor][ArcGIS] bind skipped because model is already bound")
             return
