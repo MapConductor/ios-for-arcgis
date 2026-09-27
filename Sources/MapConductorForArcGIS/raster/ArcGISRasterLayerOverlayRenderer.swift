@@ -115,14 +115,15 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
     /// `tileSize` に**反比例**させる。ここを 256 のままにすると、レイヤは正しい大きさで
     /// 敷かれるのに**別の level のタイルを取りに行く**（地図がずれた位置に描かれる）。
     ///
-    /// ## android とここだけ形が違う
+    /// ## android も同じ形（2026-09 に揃えた）
     ///
-    /// android-for-arcgis の `resolveLodReferenceTileSize` は、tileWidth は 512 のまま
-    /// **解像度だけ 256 基準**で組んでいる。あちらの SDK は tileWidth に関係なく
-    /// (col,row) を 256 グリッドで計算してしまい、素直に組むと (z,x,y) がずれるため。
-    /// iOS の SDK にはその癖が無く、素直に組んで実測でも位置は動かなかった
-    /// （赤紫の路線の画面 y 座標が修正の前後で 660/1769 のまま）。
-    /// **android の書き方を持ち込まないこと。** 持ち込むと今度は iOS がずれる。
+    /// android-for-arcgis には「3D SceneView は 256 基準でないと何も要求しない」
+    /// という読み替え（`resolveLodReferenceTileSize`）があり、512 のときだけ
+    /// 解像度を 256 基準で組んでいた。tileWidth は 512 のままなので、レベル L の
+    /// タイルが L-1 の広さを覆う**番号だけ 1 段深い格子**になり、実機で
+    /// 「z=13, x=3637」（東京の z=13 は x=7276）という噛み合わない組を引いて
+    /// 大西洋のタイルを描いていた。ArcGIS 300 では読み替え無しで 2D/3D とも
+    /// 正しく引くので削除済み。**どちらのプラットフォームでも tileSize 基準。**
     private static func webMercatorTileInfo(tileSize: Int) -> TileInfo {
         let size = max(1, tileSize)
         let levels = (0...maxTileLevel).map { level -> LevelOfDetail in
