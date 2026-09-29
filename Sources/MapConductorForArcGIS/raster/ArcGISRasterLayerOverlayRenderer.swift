@@ -11,21 +11,67 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
     convenience init(scene: ArcGIS.Scene) {
         self.init(
             addLayer: { [weak scene] layer in scene?.addOperationalLayer(layer) },
-            removeLayer: { [weak scene] layer in scene?.removeOperationalLayer(layer) }
+            removeLayer: { [weak scene] layer in scene?.removeOperationalLayer(layer) },
+            insertLayer: { [weak scene] layer, above in
+                guard let scene else { return }
+                if let index = scene.operationalLayers.firstIndex(where: { $0 === above }) {
+                    scene.insertOperationalLayer(layer, at: index + 1)
+                } else {
+                    scene.addOperationalLayer(layer)
+                }
+            }
         )
     }
 
     convenience init(map: ArcGIS.Map) {
         self.init(
             addLayer: { [weak map] layer in map?.addOperationalLayer(layer) },
-            removeLayer: { [weak map] layer in map?.removeOperationalLayer(layer) }
+            removeLayer: { [weak map] layer in map?.removeOperationalLayer(layer) },
+            insertLayer: { [weak map] layer, above in
+                guard let map else { return }
+                if let index = map.operationalLayers.firstIndex(where: { $0 === above }) {
+                    map.insertOperationalLayer(layer, at: index + 1)
+                } else {
+                    map.addOperationalLayer(layer)
+                }
+            }
         )
     }
 
-    init(addLayer: @escaping (Layer) -> Void, removeLayer: @escaping (Layer) -> Void) {
+    /// Puts a layer directly above another one.
+    private let insertLayerAbove: (Layer, Layer) -> Void
+
+    init(
+        addLayer: @escaping (Layer) -> Void,
+        removeLayer: @escaping (Layer) -> Void,
+        insertLayer: @escaping (Layer, Layer) -> Void
+    ) {
         self.addLayer = addLayer
         self.removeLayerFn = removeLayer
+        self.insertLayerAbove = insertLayer
         super.init()
+    }
+
+    /// How long the layer being replaced stays under its replacement. No
+    /// signal says a tiled layer has drawn its first tiles, so this is a
+    /// window: the replacement's tiles come from the disk cache and land well
+    /// inside it.
+    static let handoverSeconds: TimeInterval = 1.2
+
+    /// Builds this entity's layer again, in place: the new one goes directly
+    /// above the old, which stays for ``handoverSeconds`` and is then removed.
+    /// Replacing by remove-then-add left the map bare until the new tiles
+    /// landed, and the direct layers are rebuilt after every interaction --
+    /// that was the flicker.
+    func rebuildLayer(entity: RasterLayerEntity<Layer>) async -> Layer? {
+        guard let old = entity.layer else { return await createLayer(state: entity.state) }
+        guard let layer = makeLayer(from: entity.state) else { return nil }
+        apply(state: entity.state, to: layer)
+        insertLayerAbove(layer, old)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.handoverSeconds) { [weak self] in
+            self?.removeLayerFn(old)
+        }
+        return layer
     }
 
     override func createLayer(state: RasterLayerState) async -> Layer? {

@@ -114,7 +114,17 @@ private struct ArcGISMapViewBody: View {
                     }
                     .onInteractingChanged { isInteracting in
                         if !isInteracting {
-                            model.refreshDirectTileLayers()
+                            // The direct layers used to be rebuilt after every
+                            // interaction, from when their callback could
+                            // return nil and leave holes. It never does now,
+                            // and every rebuild was a flicker: the new layer
+                            // pyramid-loads from scratch and shows its
+                            // transparent ancestors first. Rebuild only when
+                            // the camera has landed on a level that was
+                            // answered transparent.
+                            if model.controller?.rasterLayerController.renderer.directLayersNeedRebuild() == true {
+                                model.refreshDirectTileLayers()
+                            }
                             model.handleDragInteractionEnded()
                         }
                     }

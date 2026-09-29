@@ -21,8 +21,9 @@ final class ArcGISRasterLayerController: RasterLayerController<Layer, ArcGISRast
             .filter { renderer.isDirectLocalLayer(state: $0.state) }
             .sorted { $0.state.zIndex < $1.state.zIndex }
         for entity in entities {
-            await renderer.removeLayer(entity: entity)
-            guard let layer = await renderer.createLayer(state: entity.state) else { continue }
+            // In place, over the old one; the renderer removes the old layer
+            // once the new one has had time to draw.
+            guard let layer = await renderer.rebuildLayer(entity: entity) else { continue }
             rasterLayerManager.registerEntity(RasterLayerEntity(layer: layer, state: entity.state))
         }
         renderer.directLayersRebuilt()
