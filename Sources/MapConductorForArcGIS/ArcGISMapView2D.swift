@@ -109,6 +109,7 @@ private struct ArcGISMapView2DBody: View {
             }
             .onInteractingChanged { isInteracting in
                 if !isInteracting {
+                    model.refreshDirectTileLayers()
                     model.handleDragInteractionEnded()
                 }
             }
@@ -576,6 +577,12 @@ private final class ArcGISMapView2DModel: ObservableObject {
         guard dragState == .dragging else { return }
         _ = controller?.finishMarkerDrag()
         dragState = .idle
+    }
+
+    func refreshDirectTileLayers() {
+        Task { [weak self] in
+            await self?.controller?.rasterLayerController.refreshDirectLayers()
+        }
     }
 
     func updateContent(_ content: MapViewContent) async {

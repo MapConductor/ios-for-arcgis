@@ -1,6 +1,7 @@
 import ArcGIS
 import Foundation
 import MapConductorCore
+import UIKit
 
 @MainActor
 final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer<Layer> {
@@ -65,6 +66,146 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
         removeLayerFn(layer)
     }
 
+    /**
+     Draws one tile in the process, off Swift's cooperative pool.
+
+     `renderLocalTile` is synchronous and blocks: it waits for one of the
+     server's render slots, then rasterises. Called straight from the
+     `CustomTiledLayer` closure it blocks a cooperative thread, and there are
+     only as many of those as the device has cores. ArcGIS's 3D view asks for
+     around 120 tiles at once, so the pool filled with threads waiting on a
+     six-wide gate, the work that would have released the gate had nowhere to
+     run, and the map stopped: measured on an iPad, four tiles in thirty
+     seconds and a blank screen.
+
+     A queue of its own gives the blocking work real threads. The continuation
+     hands the bytes back without holding a cooperative thread while it waits.
+
+     Cancellation is read through a box rather than `Task.isCancelled` inside
+     the closure: by then the work is on this queue, where there is no current
+     task and the answer would always be "no". `withTaskCancellationHandler`
+     ticks the box from whichever context ArcGIS cancels on.
+     */
+    private static let directTileQueue = DispatchQueue(
+        label: "MapConductorForArcGIS.directTile",
+        qos: .utility,
+        attributes: .concurrent
+    )
+
+    /**
+     The level the camera is looking at, as ArcGIS numbers them, so a request
+     for some other level can wait its turn instead of taking a render slot.
+
+     A zoom out of a few pinches puts several hundred requests in flight, and
+     most are for levels the camera has already left: on an iPad, 359 of 581
+     tiles drawn for one such gesture were never seen. ArcGIS does cancel them
+     — but only the ones that have not started, and with six render slots and
+     a queue that fills faster than it drains, a stale request usually starts
+     before the cancellation arrives and is then drawn to the end.
+
+     So a request far from the current level is held back, off the queue, for
+     a moment. If ArcGIS cancels it meanwhile it costs nothing; if the camera
+     catches up with it, it goes ahead; and if neither happens within the
+     allowance it goes ahead anyway. It is never answered with nothing: an
+     earlier attempt returned nil for such requests, and ArcGIS took that as
+     "there is no tile here" and left holes until the layer was rebuilt.
+
+     `MapCameraPosition.zoom` is MapConductor's one yardstick on every provider
+     (Google's zoom, 256 px tiles). The 3D view picks the level whose tile
+     covers 256 *device* pixels of ground -- by ground extent, not by index:
+     a ladder shifted two levels made it pick 15 where it had picked 13, and
+     shows every tile across those 256 pixels whatever `tileWidth` says, so no
+     ladder makes it show a bigger tile. With the honest ladder that level is
+     the zoom plus log2(scale). Per renderer, because two ArcGIS maps on one
+     screen look at different zooms.
+     */
+    final class LevelBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var level: Int?
+        private var changedAt: Date?
+
+        func set(unifiedZoom: Double, displayScale: Double) {
+            let wanted = Int((unifiedZoom + log2(max(1.0, displayScale))).rounded())
+            lock.lock()
+            if wanted != level {
+                level = wanted
+                changedAt = Date()
+            }
+            lock.unlock()
+        }
+
+        /// Whether a request may go straight to the queue.
+        ///
+        /// Off-level requests are held back only while the camera is moving,
+        /// or has just stopped. The level alone cannot tell the two cases
+        /// apart: on first load ArcGIS wants every ancestor, in order, before
+        /// it issues the level on screen, so holding ancestors held everything
+        /// (19 tiles of the level on screen in five seconds against 58). A zoom
+        /// out leaves the same shape of request behind — levels away from the
+        /// camera — but there the camera has just changed, and those requests
+        /// are the ones a cancellation is about to reach. So the moving camera
+        /// is the signal, not the level.
+        func isReady(level requested: Int) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard let level, let changedAt else { return true }
+            if Date().timeIntervalSince(changedAt) > Self.settled { return true }
+            return abs(requested - level) <= 1
+        }
+
+        /// How long after the camera stops that off-level requests are still
+        /// treated as left over from the movement.
+        static let settled: TimeInterval = 1.0
+    }
+
+    private let currentLevel = LevelBox()
+
+    func cameraMoved(unifiedZoom: Double) {
+        currentLevel.set(unifiedZoom: unifiedZoom, displayScale: Double(UIScreen.main.scale))
+    }
+
+    /// How long a stale request may be held before it is drawn regardless.
+    /// Long enough for a cancellation to arrive, short enough that a level the
+    /// camera genuinely wants is not kept waiting noticeably.
+    private static let staleRequestAllowance: TimeInterval = 1.5
+
+    private final class CancelBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func cancel() {
+            lock.lock(); cancelled = true; lock.unlock()
+        }
+
+        var isCancelled: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return cancelled
+        }
+    }
+
+    private static func renderOffTheCooperativePool(
+        server: LocalTileServer,
+        url: URL
+    ) async -> Data? {
+        let box = CancelBox()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                directTileQueue.async {
+                    continuation.resume(
+                        returning: server.renderLocalTile(url: url) { box.isCancelled }
+                    )
+                }
+            }
+        } onCancel: {
+            box.cancel()
+        }
+    }
+
+    func isDirectLocalLayer(state: RasterLayerState) -> Bool {
+        guard case let .urlTemplate(template, _, _, _, _, _) = state.source else { return false }
+        let server = TileServerRegistry.get()
+        return template.hasPrefix(server.baseUrl + "/")
+    }
+
     private func apply(state: RasterLayerState, to layer: Layer) {
         layer.opacity = Float(state.opacity)
         layer.isVisible = state.visible
@@ -84,6 +225,38 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
                 .replacingOccurrences(of: "{z}", with: "{level}")
                 .replacingOccurrences(of: "{x}", with: "{col}")
                 .replacingOccurrences(of: "{y}", with: "{row}")
+
+            // MapConductor-generated tiles already live in this process. The
+            // ArcGIS callback carries real task cancellation, whereas a local
+            // HTTP server cannot distinguish "request body is finished" from
+            // "the client abandoned the response" by looking at a TCP FIN.
+            // Calling the registered provider directly both removes the
+            // loopback hop and lets obsolete fly-through/pan tiles stop taking
+            // render slots immediately.
+            let server = TileServerRegistry.get()
+            let levels = currentLevel
+            if template.hasPrefix(server.baseUrl + "/") {
+                return CustomTiledLayer(
+                    tileInfo: Self.webMercatorTileInfo(tileSize: tileSize),
+                    fullExtent: ImageTiledLayer.defaultFullExtent
+                ) { key in
+                    guard !Task.isCancelled else { return nil }
+                    // A request for a level the camera is not looking at
+                    // waits here, off the queue, for a cancellation that
+                    // usually comes. See `LevelBox`.
+                    let deadline = Date().addingTimeInterval(Self.staleRequestAllowance)
+                    while !levels.isReady(level: key.level), Date() < deadline {
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        if Task.isCancelled { return nil }
+                    }
+                    let urlText = template
+                        .replacingOccurrences(of: "{z}", with: String(key.level))
+                        .replacingOccurrences(of: "{x}", with: String(key.column))
+                        .replacingOccurrences(of: "{y}", with: String(key.row))
+                    guard let url = URL(string: urlText) else { return nil }
+                    return await Self.renderOffTheCooperativePool(server: server, url: url)
+                }
+            }
             return WebTiledLayer(
                 urlTemplate: converted,
                 subDomains: [],
@@ -157,4 +330,5 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
 
     /// XYZ タイルの上限。web メルカトルの一般的な範囲に合わせる。
     private static let maxTileLevel = 23
+
 }

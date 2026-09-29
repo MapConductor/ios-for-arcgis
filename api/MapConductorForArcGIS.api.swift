@@ -49,6 +49,7 @@ public struct ArcGISDesign : MapConductorForArcGIS.ArcGISMapDesignTypeProtocol, 
   public static let ModernAntique: MapConductorForArcGIS.ArcGISDesign
   public static let Midcentury: MapConductorForArcGIS.ArcGISDesign
   public static let Newspaper: MapConductorForArcGIS.ArcGISDesign
+  public static let None: MapConductorForArcGIS.ArcGISDesign
   public static let HillshadeLight: MapConductorForArcGIS.ArcGISDesign
   public static let HillshadeDark: MapConductorForArcGIS.ArcGISDesign
   public static let StreetsReliefBase: MapConductorForArcGIS.ArcGISDesign
@@ -82,6 +83,7 @@ public struct ArcGISDesign : MapConductorForArcGIS.ArcGISMapDesignTypeProtocol, 
   public static let OsmNavigation: MapConductorForArcGIS.ArcGISDesign
   public static let OsmNavigationDark: MapConductorForArcGIS.ArcGISDesign
   public static func Create(id: Swift.String, sources: [Swift.String] = []) -> MapConductorForArcGIS.ArcGISDesign
+  public static func basemap(for designType: MapConductorForArcGIS.ArcGISMapDesignType) -> ArcGIS.Basemap?
   public static func toBasemapStyle(_ designType: MapConductorForArcGIS.ArcGISMapDesignType) -> ArcGIS.Basemap.Style
   public static func == (a: MapConductorForArcGIS.ArcGISDesign, b: MapConductorForArcGIS.ArcGISDesign) -> Swift.Bool
   public typealias Identifier = Swift.String

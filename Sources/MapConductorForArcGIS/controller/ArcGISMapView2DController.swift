@@ -146,7 +146,7 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     }
 
     func setMapDesignType(_ value: ArcGISMapDesignType) {
-        typedHolder.map.basemap = Basemap(style: ArcGISDesign.toBasemapStyle(value))
+        typedHolder.map.basemap = ArcGISDesign.basemap(for: value)
         mapDesignTypeChangeListener?(value)
     }
 

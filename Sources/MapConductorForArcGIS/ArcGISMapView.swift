@@ -114,6 +114,7 @@ private struct ArcGISMapViewBody: View {
                     }
                     .onInteractingChanged { isInteracting in
                         if !isInteracting {
+                            model.refreshDirectTileLayers()
                             model.handleDragInteractionEnded()
                         }
                     }
@@ -282,7 +283,12 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             state.cameraPosition.bearing,
             state.cameraPosition.tilt
         )
-        let scene = ArcGIS.Scene(basemapStyle: ArcGISDesign.toBasemapStyle(state.mapDesignType))
+        let scene: ArcGIS.Scene
+        if let basemap = ArcGISDesign.basemap(for: state.mapDesignType) {
+            scene = ArcGIS.Scene(basemap: basemap)
+        } else {
+            scene = ArcGIS.Scene()
+        }
         let initialCamera = state.cameraPosition.toArcGISCamera()
         let initialCenter = state.cameraPosition.position.toArcGISPoint(spatialReference: .wgs84)
         let initialScale = max(1, state.cameraPosition.altitudeForArcGIS())
@@ -371,14 +377,30 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
         // from the registry; this provider never learns that clustering exists.
         state.serviceRegistry.put(MarkerRenderingSupportKey.self, self)
-        // この画面は 3D の SceneView で、**タイルは 256px** という前提でレベルを
-        // 選ぶ。512px のタイルを渡すと 1 段深いレベルを 4 倍の枚数で引く
-        // （Android 実機・統一ズーム 12 で、2D は z=11、3D は z=12）。絵は正しい
-        // ので気づきにくいぶん、供給側が知れるように宣言しておく。2D の
-        // `ArcGISMapView2D` は好みが無いので登録しない。
+        // この画面は 3D の SceneView で、**タイル 1 枚 = 256 デバイスピクセル**を
+        // 前提にレベルを選ぶ。ポイントではなくピクセルなのがここの肝で、Retina では
+        // 1 枚が画面で覆うのは 256pt ではなく `256 / scale` pt になる。
+        //
+        // レベルの選択は**宣言したサイズに依存しない**。実測（iPad Pro 11"、
+        // scale=2、統一ズーム 12）では、256 と宣言しても 512 と宣言しても要求は
+        // 同じ z=13 だった。z=13 のタイルが画面で覆うのは 128pt なので、256 と
+        // 宣言すれば文字も線もちょうど半分、512 なら四分の一になる。同じ
+        // 「江戸川区」のインクは 256 で 35x10、128 で 99x23、2D は 104x24。
+        //
+        // ここが 256 だったのは android の計測値をそのまま持ってきたためで、
+        // iOS では測っていなかった。android の SceneView は dp 基準なので
+        // あちらは 256 のままでよい（MapLibre と文字サイズが一致することを実測）。
+        // 2D の `ArcGISMapView2D` は宣言どおり pt で扱うので、何も登録しない。
+        // And no ladder changes it: the view picks its level by the ground a
+        // tile covers and shows every tile across those 256 device pixels
+        // whatever `tileWidth` says (a ladder shifted by two made it pick
+        // level 15 instead of 13 and drew the map at a quarter scale). 512 pt
+        // tiles are not available on this view.
+        let tileDevicePixels = 256.0
+        let displayPoints = Int((tileDevicePixels / max(1.0, UIScreen.main.scale)).rounded())
         state.serviceRegistry.put(
             RasterTilePreferenceKey.self,
-            FixedRasterTilePreference(preferredTileSize: 256)
+            FixedRasterTilePreference(preferredTileSize: max(1, displayPoints))
         )
         if didBind {
             NSLog("[MapConductor][ArcGIS] bind skipped because model is already bound")
@@ -579,12 +601,21 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         dragState = .idle
     }
 
+    func refreshDirectTileLayers() {
+        Task { [weak self] in
+            await self?.controller?.rasterLayerController.refreshDirectLayers()
+        }
+    }
+
     func notifyCameraMove(camera: Camera) {
         let position = camera.toMapCameraPosition(
             logicalTiltHint: controller?.lastLogicalTilt,
             viewportSize: container.viewportSize
         )
         container.lastCameraPosition = position
+        // The in-process tile callback holds back requests for levels the
+        // camera is not looking at; this is how it knows which level that is.
+        controller?.rasterLayerController.renderer.cameraMoved(unifiedZoom: position.zoom)
         controller?.notifyCameraMove(position)
 
         cameraMoveEndWorkItem?.cancel()
