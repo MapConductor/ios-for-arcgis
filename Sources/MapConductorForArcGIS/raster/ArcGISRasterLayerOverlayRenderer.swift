@@ -123,6 +123,12 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
         private let lock = NSLock()
         private var level: Int?
         private var changedAt: Date?
+        /// Levels answered with a transparent tile since the layer was last
+        /// built. ArcGIS keeps what it was given, so a level stubbed as an
+        /// ancestor stays blank if the camera later lands on it -- unless the
+        /// layer is rebuilt, which is what `wantsRebuild` asks for.
+        private var stubbed = Set<Int>()
+        private var rebuildWanted = false
 
         func set(unifiedZoom: Double, displayScale: Double) {
             let wanted = Int((unifiedZoom + log2(max(1.0, displayScale))).rounded())
@@ -130,8 +136,39 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
             if wanted != level {
                 level = wanted
                 changedAt = Date()
+                if stubbed.contains(wanted) || stubbed.contains(wanted - 1) || stubbed.contains(wanted + 1) {
+                    rebuildWanted = true
+                }
             }
             lock.unlock()
+        }
+
+        /// A level the camera is not looking at and will not be soon: two or
+        /// more above the level on screen. ArcGIS's 3D view asks for every
+        /// one of those before, and alongside, the level it shows (42 of the
+        /// 119 tiles of an iPad screen), and draws none of them once the level
+        /// on screen is in. They are answered transparent, without a render.
+        func isAncestor(level requested: Int) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard let level else { return false }
+            return requested < level - 1
+        }
+
+        func markStubbed(level: Int) {
+            lock.lock(); stubbed.insert(level); lock.unlock()
+        }
+
+        /// Forgets the stubs: the layer was rebuilt and ArcGIS holds none.
+        func layerRebuilt() {
+            lock.lock(); stubbed.removeAll(); rebuildWanted = false; lock.unlock()
+        }
+
+        /// Once per need: whether the camera has moved onto a stubbed level.
+        func takeRebuildWanted() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            let wanted = rebuildWanted
+            rebuildWanted = false
+            return wanted
         }
 
         /// Whether a request may go straight to the queue.
@@ -161,6 +198,18 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
 
     func cameraMoved(unifiedZoom: Double) {
         currentLevel.set(unifiedZoom: unifiedZoom, displayScale: Double(UIScreen.main.scale))
+    }
+
+    /// Whether the camera has settled on a level that was answered with
+    /// transparent tiles, so the direct layers have to be rebuilt for it to
+    /// be requested again. Answers once per occurrence.
+    func directLayersNeedRebuild() -> Bool {
+        currentLevel.takeRebuildWanted()
+    }
+
+    /// Called when the direct layers were rebuilt: ArcGIS holds no stubs.
+    func directLayersRebuilt() {
+        currentLevel.layerRebuilt()
     }
 
     /// How long a stale request may be held before it is drawn regardless.
@@ -248,6 +297,12 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
                     while !levels.isReady(level: key.level), Date() < deadline {
                         try? await Task.sleep(nanoseconds: 50_000_000)
                         if Task.isCancelled { return nil }
+                    }
+                    // An ancestor nobody will see: a transparent tile, encoded
+                    // once and reused, in place of a render.
+                    if levels.isAncestor(level: key.level) {
+                        levels.markStubbed(level: key.level)
+                        return TransparentTile.png(size: tileSize)
                     }
                     let urlText = template
                         .replacingOccurrences(of: "{z}", with: String(key.level))

@@ -25,5 +25,6 @@ final class ArcGISRasterLayerController: RasterLayerController<Layer, ArcGISRast
             guard let layer = await renderer.createLayer(state: entity.state) else { continue }
             rasterLayerManager.registerEntity(RasterLayerEntity(layer: layer, state: entity.state))
         }
+        renderer.directLayersRebuilt()
     }
 }

@@ -622,6 +622,12 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         let viewportSize = container.viewportSize
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            // A programmatic move (fly-to, fitBounds) ends no interaction, so
+            // the rebuild that re-requests a level answered transparent has to
+            // come from here.
+            if self.controller?.rasterLayerController.renderer.directLayersNeedRebuild() == true {
+                self.refreshDirectTileLayers()
+            }
             let vr = Self.computeVisibleRegion(for: position, viewportSize: viewportSize)
             let posWithVR = MapCameraPosition(
                 position: position.position,
