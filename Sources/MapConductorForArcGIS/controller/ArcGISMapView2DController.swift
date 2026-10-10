@@ -146,7 +146,14 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     }
 
     func setMapDesignType(_ value: ArcGISMapDesignType) {
-        typedHolder.map.basemap = ArcGISDesign.basemap(for: value)
+        let map = typedHolder.map
+        map.basemap = ArcGISDesign.basemap(for: value)
+        // A map that failed to load -- its basemap was out of reach -- gets
+        // another go with the new basemap, or with none, which needs no
+        // network at all.
+        if case .failed = map.loadStatus {
+            Task { try? await map.retryLoad() }
+        }
         mapDesignTypeChangeListener?(value)
     }
 

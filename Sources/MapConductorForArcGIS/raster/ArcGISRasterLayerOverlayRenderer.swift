@@ -242,8 +242,11 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
 
     private let currentLevel = LevelBox()
 
-    func cameraMoved(unifiedZoom: Double) {
-        currentLevel.set(unifiedZoom: unifiedZoom, displayScale: Double(UIScreen.main.scale))
+    /// `displayScale` is what the view adds to the zoom to pick a level: the
+    /// 3D view renders at device pixels and asks for a level deeper on a 2x
+    /// screen, the 2D map picks its level by map scale alone and passes 1.
+    func cameraMoved(unifiedZoom: Double, displayScale: Double = Double(UIScreen.main.scale)) {
+        currentLevel.set(unifiedZoom: unifiedZoom, displayScale: displayScale)
     }
 
     /// Whether the camera has settled on a level that was answered with
@@ -335,14 +338,19 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
                     tileInfo: Self.webMercatorTileInfo(tileSize: tileSize),
                     fullExtent: ImageTiledLayer.defaultFullExtent
                 ) { key in
-                    guard !Task.isCancelled else { return nil }
+                    // A cancelled request is an error, never an empty tile:
+                    // ArcGIS keeps nil as "nothing here" and asks no more, so
+                    // a burst it cancels itself (the viewpoint is still being
+                    // settled when the layer lands) would leave the view
+                    // blank for good. Thrown, the tile is asked for again.
+                    guard !Task.isCancelled else { throw CancellationError() }
                     // A request for a level the camera is not looking at
                     // waits here, off the queue, for a cancellation that
                     // usually comes. See `LevelBox`.
                     let deadline = Date().addingTimeInterval(Self.staleRequestAllowance)
                     while !levels.isReady(level: key.level), Date() < deadline {
                         try? await Task.sleep(nanoseconds: 50_000_000)
-                        if Task.isCancelled { return nil }
+                        if Task.isCancelled { throw CancellationError() }
                     }
                     // An ancestor nobody will see: a transparent tile, encoded
                     // once and reused, in place of a render.
@@ -355,7 +363,9 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
                         .replacingOccurrences(of: "{x}", with: String(key.column))
                         .replacingOccurrences(of: "{y}", with: String(key.row))
                     guard let url = URL(string: urlText) else { return nil }
-                    return await Self.renderOffTheCooperativePool(server: server, url: url)
+                    let data = await Self.renderOffTheCooperativePool(server: server, url: url)
+                    if data == nil, Task.isCancelled { throw CancellationError() }
+                    return data
                 }
             }
             return WebTiledLayer(
