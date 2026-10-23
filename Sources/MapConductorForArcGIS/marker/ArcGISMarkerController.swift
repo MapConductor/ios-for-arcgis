@@ -89,13 +89,11 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         markers.forEach { subscribeToMarker($0.state) }
     }
 
-    /// android-for-arcgis の `ArcGISMarkerController.find()` と同じく、最近傍マーカーを
-    /// 「アイコン矩形 + tapTolerance」で判定する。半径固定だと大きいアイコンは端が反応せず、
-    /// 小さいアイコンは離れていても反応してしまうため、アイコンの実寸とアンカーを使う。
+    /// android-sdk の `AbstractMarkerController.find()` と同じく、タップ点の周りのマーカーを候補にし、
+    /// 指の下にアイコン（ラベル込み）が描かれているものを優先する（``MarkerHitTest/pick``）。
     ///
     /// 投影できない場合（proxy 未接続など）は判定できないので、従来どおり最近傍を返す。
     override func find(position: GeoPointProtocol) -> MarkerEntity<Graphic>? {
-        guard let nearest = markerManager.findNearest(position: position) else { return nil }
         // 基底の `find` は nonisolated だが、呼び出し元はタップ処理（`handleTap`）だけで
         // 常にメインアクター上。投影 API（`ArcGISMapContext`）はメインアクター隔離のため、
         // ここで隔離済みであることを明示する。
@@ -103,17 +101,23 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
             guard let container,
                   let touchScreen = container.screenPoint(
                       fromLocation: position.toArcGISPoint(spatialReference: .wgs84)
-                  ),
-                  let markerScreen = container.screenPoint(
-                      fromLocation: nearest.state.position.toArcGISPoint(spatialReference: .wgs84)
                   ) else {
-                return nearest
+                return markerManager.findNearest(position: position)
             }
-            return MarkerHitTest.hitsIcon(
+            let project: (GeoPointProtocol) -> CGPoint? = {
+                container.screenPoint(fromLocation: $0.toArcGISPoint(spatialReference: .wgs84))
+            }
+            guard let bounds = MarkerHitTest.searchBounds(
+                position: position,
                 touchScreen: touchScreen,
-                markerScreen: markerScreen,
-                state: nearest.state
-            ) ? nearest : nil
+                project: project
+            ) else { return nil }
+            return MarkerHitTest.pick(
+                touchScreen: touchScreen,
+                candidates: markerManager.findMarkersInBounds(bounds),
+                state: { $0.state },
+                project: project
+            )
         }
     }
 
@@ -252,31 +256,16 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     }
 
     /// ドラッグ開始時のヒットテスト。タップ（``find(position:)``）と同じ
-    /// 「アイコン矩形 + tapTolerance」で判定する。以前はアイコンの外接円を使った半径判定
+    /// ``MarkerHitTest/pick`` の規則で選ぶ。以前はアイコンの外接円を使った半径判定
     /// （`max(22, 最大辺 / 2)`）で、同じアイコンでもタップとドラッグで当たる範囲が違っていた。
     private func draggableMarker(at screenPoint: CGPoint) -> MarkerEntity<Graphic>? {
         guard let container else { return nil }
-
-        var bestEntity: MarkerEntity<Graphic>?
-        var bestDistance = CGFloat.infinity
-
-        for entity in markerManager.allEntities() where entity.state.draggable {
-            let location = entity.state.position.toArcGISPoint(spatialReference: .wgs84)
-            guard let projected = container.screenPoint(fromLocation: location) else { continue }
-            guard MarkerHitTest.hitsIcon(
-                touchScreen: screenPoint,
-                markerScreen: projected,
-                state: entity.state
-            ) else { continue }
-
-            let distance = hypot(screenPoint.x - projected.x, screenPoint.y - projected.y)
-            if distance < bestDistance {
-                bestDistance = distance
-                bestEntity = entity
-            }
-        }
-
-        return bestEntity
+        return MarkerHitTest.pick(
+            touchScreen: screenPoint,
+            candidates: markerManager.allEntities().filter { $0.state.draggable },
+            state: { $0.state },
+            project: { container.screenPoint(fromLocation: $0.toArcGISPoint(spatialReference: .wgs84)) }
+        )
     }
 
     private func subscribeToMarker(_ state: MarkerState) {
