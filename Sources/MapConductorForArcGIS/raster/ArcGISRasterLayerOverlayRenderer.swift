@@ -1,6 +1,7 @@
 import ArcGIS
 import Foundation
 import MapConductorCore
+import UIKit
 
 @MainActor
 final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer<Layer> {
@@ -10,21 +11,67 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
     convenience init(scene: ArcGIS.Scene) {
         self.init(
             addLayer: { [weak scene] layer in scene?.addOperationalLayer(layer) },
-            removeLayer: { [weak scene] layer in scene?.removeOperationalLayer(layer) }
+            removeLayer: { [weak scene] layer in scene?.removeOperationalLayer(layer) },
+            insertLayer: { [weak scene] layer, above in
+                guard let scene else { return }
+                if let index = scene.operationalLayers.firstIndex(where: { $0 === above }) {
+                    scene.insertOperationalLayer(layer, at: index + 1)
+                } else {
+                    scene.addOperationalLayer(layer)
+                }
+            }
         )
     }
 
     convenience init(map: ArcGIS.Map) {
         self.init(
             addLayer: { [weak map] layer in map?.addOperationalLayer(layer) },
-            removeLayer: { [weak map] layer in map?.removeOperationalLayer(layer) }
+            removeLayer: { [weak map] layer in map?.removeOperationalLayer(layer) },
+            insertLayer: { [weak map] layer, above in
+                guard let map else { return }
+                if let index = map.operationalLayers.firstIndex(where: { $0 === above }) {
+                    map.insertOperationalLayer(layer, at: index + 1)
+                } else {
+                    map.addOperationalLayer(layer)
+                }
+            }
         )
     }
 
-    init(addLayer: @escaping (Layer) -> Void, removeLayer: @escaping (Layer) -> Void) {
+    /// Puts a layer directly above another one.
+    private let insertLayerAbove: (Layer, Layer) -> Void
+
+    init(
+        addLayer: @escaping (Layer) -> Void,
+        removeLayer: @escaping (Layer) -> Void,
+        insertLayer: @escaping (Layer, Layer) -> Void
+    ) {
         self.addLayer = addLayer
         self.removeLayerFn = removeLayer
+        self.insertLayerAbove = insertLayer
         super.init()
+    }
+
+    /// How long the layer being replaced stays under its replacement. No
+    /// signal says a tiled layer has drawn its first tiles, so this is a
+    /// window: the replacement's tiles come from the disk cache and land well
+    /// inside it.
+    static let handoverSeconds: TimeInterval = 1.2
+
+    /// Builds this entity's layer again, in place: the new one goes directly
+    /// above the old, which stays for ``handoverSeconds`` and is then removed.
+    /// Replacing by remove-then-add left the map bare until the new tiles
+    /// landed, and the direct layers are rebuilt after every interaction --
+    /// that was the flicker.
+    func rebuildLayer(entity: RasterLayerEntity<Layer>) async -> Layer? {
+        guard let old = entity.layer else { return await createLayer(state: entity.state) }
+        guard let layer = makeLayer(from: entity.state) else { return nil }
+        apply(state: entity.state, to: layer)
+        insertLayerAbove(layer, old)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.handoverSeconds) { [weak self] in
+            self?.removeLayerFn(old)
+        }
+        return layer
     }
 
     override func createLayer(state: RasterLayerState) async -> Layer? {
@@ -65,6 +112,198 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
         removeLayerFn(layer)
     }
 
+    /**
+     Draws one tile in the process, off Swift's cooperative pool.
+
+     `renderLocalTile` is synchronous and blocks: it waits for one of the
+     server's render slots, then rasterises. Called straight from the
+     `CustomTiledLayer` closure it blocks a cooperative thread, and there are
+     only as many of those as the device has cores. ArcGIS's 3D view asks for
+     around 120 tiles at once, so the pool filled with threads waiting on a
+     six-wide gate, the work that would have released the gate had nowhere to
+     run, and the map stopped: measured on an iPad, four tiles in thirty
+     seconds and a blank screen.
+
+     A queue of its own gives the blocking work real threads. The continuation
+     hands the bytes back without holding a cooperative thread while it waits.
+
+     Cancellation is read through a box rather than `Task.isCancelled` inside
+     the closure: by then the work is on this queue, where there is no current
+     task and the answer would always be "no". `withTaskCancellationHandler`
+     ticks the box from whichever context ArcGIS cancels on.
+     */
+    private static let directTileQueue = DispatchQueue(
+        label: "MapConductorForArcGIS.directTile",
+        qos: .utility,
+        attributes: .concurrent
+    )
+
+    /**
+     The level the camera is looking at, as ArcGIS numbers them, so a request
+     for some other level can wait its turn instead of taking a render slot.
+
+     A zoom out of a few pinches puts several hundred requests in flight, and
+     most are for levels the camera has already left: on an iPad, 359 of 581
+     tiles drawn for one such gesture were never seen. ArcGIS does cancel them
+     — but only the ones that have not started, and with six render slots and
+     a queue that fills faster than it drains, a stale request usually starts
+     before the cancellation arrives and is then drawn to the end.
+
+     So a request far from the current level is held back, off the queue, for
+     a moment. If ArcGIS cancels it meanwhile it costs nothing; if the camera
+     catches up with it, it goes ahead; and if neither happens within the
+     allowance it goes ahead anyway. It is never answered with nothing: an
+     earlier attempt returned nil for such requests, and ArcGIS took that as
+     "there is no tile here" and left holes until the layer was rebuilt.
+
+     `MapCameraPosition.zoom` is MapConductor's one yardstick on every provider
+     (Google's zoom, 256 px tiles). The 3D view picks the level whose tile
+     covers 256 *device* pixels of ground -- by ground extent, not by index:
+     a ladder shifted two levels made it pick 15 where it had picked 13, and
+     shows every tile across those 256 pixels whatever `tileWidth` says, so no
+     ladder makes it show a bigger tile. With the honest ladder that level is
+     the zoom plus log2(scale). Per renderer, because two ArcGIS maps on one
+     screen look at different zooms.
+     */
+    final class LevelBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var level: Int?
+        private var changedAt: Date?
+        /// Levels answered with a transparent tile since the layer was last
+        /// built. ArcGIS keeps what it was given, so a level stubbed as an
+        /// ancestor stays blank if the camera later lands on it -- unless the
+        /// layer is rebuilt, which is what `wantsRebuild` asks for.
+        private var stubbed = Set<Int>()
+        private var rebuildWanted = false
+
+        func set(unifiedZoom: Double, displayScale: Double) {
+            let wanted = Int((unifiedZoom + log2(max(1.0, displayScale))).rounded())
+            lock.lock()
+            if wanted != level {
+                level = wanted
+                changedAt = Date()
+                if stubbed.contains(wanted) || stubbed.contains(wanted - 1) || stubbed.contains(wanted + 1) {
+                    rebuildWanted = true
+                }
+            }
+            lock.unlock()
+        }
+
+        /// A level the camera is not looking at and will not be soon: two or
+        /// more above the level on screen. ArcGIS's 3D view asks for every
+        /// one of those before, and alongside, the level it shows (42 of the
+        /// 119 tiles of an iPad screen), and draws none of them once the level
+        /// on screen is in. They are answered transparent, without a render.
+        func isAncestor(level requested: Int) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard let level else { return false }
+            return requested < level - 1
+        }
+
+        func markStubbed(level: Int) {
+            lock.lock(); stubbed.insert(level); lock.unlock()
+        }
+
+        /// Forgets the stubs: the layer was rebuilt and ArcGIS holds none.
+        func layerRebuilt() {
+            lock.lock(); stubbed.removeAll(); rebuildWanted = false; lock.unlock()
+        }
+
+        /// Once per need: whether the camera has moved onto a stubbed level.
+        func takeRebuildWanted() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            let wanted = rebuildWanted
+            rebuildWanted = false
+            return wanted
+        }
+
+        /// Whether a request may go straight to the queue.
+        ///
+        /// Off-level requests are held back only while the camera is moving,
+        /// or has just stopped. The level alone cannot tell the two cases
+        /// apart: on first load ArcGIS wants every ancestor, in order, before
+        /// it issues the level on screen, so holding ancestors held everything
+        /// (19 tiles of the level on screen in five seconds against 58). A zoom
+        /// out leaves the same shape of request behind — levels away from the
+        /// camera — but there the camera has just changed, and those requests
+        /// are the ones a cancellation is about to reach. So the moving camera
+        /// is the signal, not the level.
+        func isReady(level requested: Int) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard let level, let changedAt else { return true }
+            if Date().timeIntervalSince(changedAt) > Self.settled { return true }
+            return abs(requested - level) <= 1
+        }
+
+        /// How long after the camera stops that off-level requests are still
+        /// treated as left over from the movement.
+        static let settled: TimeInterval = 1.0
+    }
+
+    private let currentLevel = LevelBox()
+
+    /// `displayScale` is what the view adds to the zoom to pick a level: the
+    /// 3D view renders at device pixels and asks for a level deeper on a 2x
+    /// screen, the 2D map picks its level by map scale alone and passes 1.
+    func cameraMoved(unifiedZoom: Double, displayScale: Double = Double(UIScreen.main.scale)) {
+        currentLevel.set(unifiedZoom: unifiedZoom, displayScale: displayScale)
+    }
+
+    /// Whether the camera has settled on a level that was answered with
+    /// transparent tiles, so the direct layers have to be rebuilt for it to
+    /// be requested again. Answers once per occurrence.
+    func directLayersNeedRebuild() -> Bool {
+        currentLevel.takeRebuildWanted()
+    }
+
+    /// Called when the direct layers were rebuilt: ArcGIS holds no stubs.
+    func directLayersRebuilt() {
+        currentLevel.layerRebuilt()
+    }
+
+    /// How long a stale request may be held before it is drawn regardless.
+    /// Long enough for a cancellation to arrive, short enough that a level the
+    /// camera genuinely wants is not kept waiting noticeably.
+    private static let staleRequestAllowance: TimeInterval = 1.5
+
+    private final class CancelBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func cancel() {
+            lock.lock(); cancelled = true; lock.unlock()
+        }
+
+        var isCancelled: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return cancelled
+        }
+    }
+
+    private static func renderOffTheCooperativePool(
+        server: LocalTileServer,
+        url: URL
+    ) async -> Data? {
+        let box = CancelBox()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                directTileQueue.async {
+                    continuation.resume(
+                        returning: server.renderLocalTile(url: url) { box.isCancelled }
+                    )
+                }
+            }
+        } onCancel: {
+            box.cancel()
+        }
+    }
+
+    func isDirectLocalLayer(state: RasterLayerState) -> Bool {
+        guard case let .urlTemplate(template, _, _, _, _, _) = state.source else { return false }
+        let server = TileServerRegistry.get()
+        return template.hasPrefix(server.baseUrl + "/")
+    }
+
     private func apply(state: RasterLayerState, to layer: Layer) {
         layer.opacity = Float(state.opacity)
         layer.isVisible = state.visible
@@ -84,6 +323,51 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
                 .replacingOccurrences(of: "{z}", with: "{level}")
                 .replacingOccurrences(of: "{x}", with: "{col}")
                 .replacingOccurrences(of: "{y}", with: "{row}")
+
+            // MapConductor-generated tiles already live in this process. The
+            // ArcGIS callback carries real task cancellation, whereas a local
+            // HTTP server cannot distinguish "request body is finished" from
+            // "the client abandoned the response" by looking at a TCP FIN.
+            // Calling the registered provider directly both removes the
+            // loopback hop and lets obsolete fly-through/pan tiles stop taking
+            // render slots immediately.
+            let server = TileServerRegistry.get()
+            let levels = currentLevel
+            if template.hasPrefix(server.baseUrl + "/") {
+                return CustomTiledLayer(
+                    tileInfo: Self.webMercatorTileInfo(tileSize: tileSize),
+                    fullExtent: ImageTiledLayer.defaultFullExtent
+                ) { key in
+                    // A cancelled request is an error, never an empty tile:
+                    // ArcGIS keeps nil as "nothing here" and asks no more, so
+                    // a burst it cancels itself (the viewpoint is still being
+                    // settled when the layer lands) would leave the view
+                    // blank for good. Thrown, the tile is asked for again.
+                    guard !Task.isCancelled else { throw CancellationError() }
+                    // A request for a level the camera is not looking at
+                    // waits here, off the queue, for a cancellation that
+                    // usually comes. See `LevelBox`.
+                    let deadline = Date().addingTimeInterval(Self.staleRequestAllowance)
+                    while !levels.isReady(level: key.level), Date() < deadline {
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        if Task.isCancelled { throw CancellationError() }
+                    }
+                    // An ancestor nobody will see: a transparent tile, encoded
+                    // once and reused, in place of a render.
+                    if levels.isAncestor(level: key.level) {
+                        levels.markStubbed(level: key.level)
+                        return TransparentTile.png(size: tileSize)
+                    }
+                    let urlText = template
+                        .replacingOccurrences(of: "{z}", with: String(key.level))
+                        .replacingOccurrences(of: "{x}", with: String(key.column))
+                        .replacingOccurrences(of: "{y}", with: String(key.row))
+                    guard let url = URL(string: urlText) else { return nil }
+                    let data = await Self.renderOffTheCooperativePool(server: server, url: url)
+                    if data == nil, Task.isCancelled { throw CancellationError() }
+                    return data
+                }
+            }
             return WebTiledLayer(
                 urlTemplate: converted,
                 subDomains: [],
@@ -115,14 +399,15 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
     /// `tileSize` に**反比例**させる。ここを 256 のままにすると、レイヤは正しい大きさで
     /// 敷かれるのに**別の level のタイルを取りに行く**（地図がずれた位置に描かれる）。
     ///
-    /// ## android とここだけ形が違う
+    /// ## android も同じ形（2026-09 に揃えた）
     ///
-    /// android-for-arcgis の `resolveLodReferenceTileSize` は、tileWidth は 512 のまま
-    /// **解像度だけ 256 基準**で組んでいる。あちらの SDK は tileWidth に関係なく
-    /// (col,row) を 256 グリッドで計算してしまい、素直に組むと (z,x,y) がずれるため。
-    /// iOS の SDK にはその癖が無く、素直に組んで実測でも位置は動かなかった
-    /// （赤紫の路線の画面 y 座標が修正の前後で 660/1769 のまま）。
-    /// **android の書き方を持ち込まないこと。** 持ち込むと今度は iOS がずれる。
+    /// android-for-arcgis には「3D SceneView は 256 基準でないと何も要求しない」
+    /// という読み替え（`resolveLodReferenceTileSize`）があり、512 のときだけ
+    /// 解像度を 256 基準で組んでいた。tileWidth は 512 のままなので、レベル L の
+    /// タイルが L-1 の広さを覆う**番号だけ 1 段深い格子**になり、実機で
+    /// 「z=13, x=3637」（東京の z=13 は x=7276）という噛み合わない組を引いて
+    /// 大西洋のタイルを描いていた。ArcGIS 300 では読み替え無しで 2D/3D とも
+    /// 正しく引くので削除済み。**どちらのプラットフォームでも tileSize 基準。**
     private static func webMercatorTileInfo(tileSize: Int) -> TileInfo {
         let size = max(1, tileSize)
         let levels = (0...maxTileLevel).map { level -> LevelOfDetail in
@@ -156,4 +441,5 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
 
     /// XYZ タイルの上限。web メルカトルの一般的な範囲に合わせる。
     private static let maxTileLevel = 23
+
 }
