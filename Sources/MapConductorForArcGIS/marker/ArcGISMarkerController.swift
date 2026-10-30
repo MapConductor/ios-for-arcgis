@@ -25,7 +25,12 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     private var tileRasterLayerId: String?
     private let defaultMarkerIconForTiling: BitmapIcon = DefaultMarkerIcon().toBitmapIcon()
 
+    /// The marker tile layer's declared side.
     private static let tileSize = 256
+
+    /// Whether the map lays tiles out in points (2D `MapView`) rather than
+    /// across 256 device pixels (3D `SceneView`). See ``renderTileSize``.
+    private let tilesInPoints: Bool
 
     /// 2D の tilt 表現が変わったときに、マーカーの縦補正を掛け直す。
     func refreshVerticalStretch() {
@@ -35,9 +40,11 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     init(
         markerLayer: GraphicsOverlay,
         container: any ArcGISMapContext,
+        tilesInPoints: Bool = false,
         onUpdateInfoBubble: @escaping (String) -> Void
     ) {
         self.container = container
+        self.tilesInPoints = tilesInPoints
         self.onUpdateInfoBubble = onUpdateInfoBubble
         let markerManager = MarkerManager<Graphic>.defaultManager()
         super.init(
@@ -147,6 +154,19 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         }
     }
 
+    /// Pixels a marker tile is drawn at.
+    ///
+    /// The 3D `SceneView` shows a tile across 256 device pixels, so a 256 px
+    /// tile is shown 1:1. The 2D `MapView` lays the declared 256 out in
+    /// points -- 512 device pixels at scale 2 -- and a 256 px tile was
+    /// stretched to twice its size: pins came out twice as large with soft
+    /// edges (iPad Pro, 75 px against Google's 38). Drawn at the screen's
+    /// scale, the 2D tile fills its points pixel for pixel, like the
+    /// `retinaAwareTileSize` of the Google and MapLibre controllers.
+    private var renderTileSize: Int {
+        tilesInPoints ? Self.tileSize * max(1, Int(UIScreen.main.scale)) : Self.tileSize
+    }
+
     private func setupTileRenderer() {
         let routeId = "mapconductor-arcgis-markers-\(UUID().uuidString)"
         let contentScale = Double(UIScreen.main.scale)
@@ -156,7 +176,7 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         }
         let renderer = MarkerTileRenderer<Graphic>(
             markerManager: markerManager,
-            tileSize: Self.tileSize,
+            tileSize: renderTileSize,
             cacheSizeBytes: tilingOptions.cacheSize,
             debugTileOverlay: tilingOptions.debugTileOverlay,
             iconScaleCallback: scaledCallback,
@@ -183,7 +203,7 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         let layerId = tileRasterLayerId ?? "marker-tile-\(routeId)"
         tileRasterLayerId = layerId
         let state = RasterLayerState(
-            source: .urlTemplate(template: urlTemplate, tileSize: tileRenderer.tileSize),
+            source: .urlTemplate(template: urlTemplate, tileSize: Self.tileSize),
             id: layerId
         )
         markerTileRasterLayerCallback?(state)
