@@ -464,6 +464,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
             markerController: ArcGISMarkerController(
                 markerLayer: markerLayer,
                 container: container,
+                tilesInPoints: true,
                 onUpdateInfoBubble: { [weak self] id in
                     self?.infoBubbleCoordinator?.updateInfoBubblePosition(for: id)
                 }
