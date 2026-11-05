@@ -244,10 +244,10 @@ private final class ArcGISMapView2DModel: ObservableObject {
     let infoBubbleContainer = PassthroughContainerView()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
     /// ArcGIS 2D はカメラ停止イベントを持たないため、`onViewpointChanged` の停止を
-    /// デバウンスして「停止」とみなし、そこで範囲制限を補正する（3D 側と同じ考え方、
-    /// android-for-arcgis の `cameraMoveEndDebounceMs` に対応）。
-    private var cameraRestrictionWorkItem: DispatchWorkItem?
-    private let cameraRestrictionDebounceSeconds = 0.18
+    /// デバウンスして「停止」とみなし、範囲制限の補正とカメラ停止の通知をする（3D 側と
+    /// 同じ考え方、android-for-arcgis の `cameraMoveEndDebounceMs` に対応）。
+    private var cameraMoveEndWorkItem: DispatchWorkItem?
+    private let cameraMoveEndDebounceSeconds = 0.18
     private var hullPolygonController: ArcGISPolygonOverlayController?
     private var overlayScope: MapOverlayScope?
     @Published private(set) var didBind = false
@@ -397,7 +397,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
         // and each was a full render of a z11 tile.
         controller?.rasterLayerController.renderer.cameraMoved(unifiedZoom: cameraPosition.zoom, displayScale: 1)
         controller?.notifyCameraMove(cameraPosition)
-        scheduleCameraRestrictionCorrection(cameraPosition)
+        scheduleCameraMoveEnd(cameraPosition)
         // クラスタは visibleRegion.bounds を使うため、付与したカメラを渡す。
         let cameraForCluster = MapCameraPosition(
             position: cameraPosition.position,
@@ -412,21 +412,35 @@ private final class ArcGISMapView2DModel: ObservableObject {
 
     /// パンやズームが落ち着いてから 1 度だけ補正する。移動中に毎フレーム引き戻すと
     /// ユーザーのジェスチャーと競合するため。
-    private func scheduleCameraRestrictionCorrection(_ cameraPosition: MapCameraPosition) {
-        cameraRestrictionWorkItem?.cancel()
+    private func scheduleCameraMoveEnd(_ cameraPosition: MapCameraPosition) {
+        cameraMoveEndWorkItem?.cancel()
+        let viewportSize = container.viewportSize
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            _ = self.controller?.applyCameraRestrictionCorrectionIfNeeded(cameraPosition)
             // A programmatic move (fly-to, fitBounds) ends no interaction, so
             // the rebuild that re-requests a level answered transparent has to
             // come from here (the 3D view does the same on its camera stop).
             if self.controller?.rasterLayerController.renderer.directLayersNeedRebuild() == true {
                 self.refreshDirectTileLayers()
             }
+            let withVisibleRegion = MapCameraPosition(
+                position: cameraPosition.position,
+                zoom: cameraPosition.zoom,
+                bearing: cameraPosition.bearing,
+                tilt: cameraPosition.tilt,
+                paddings: cameraPosition.paddings,
+                visibleRegion: arcGISComputeVisibleRegion(for: cameraPosition, viewportSize: viewportSize)
+            )
+            // 範囲・ズーム制限に違反していれば矩形内へ引き戻す。引き戻すと viewpoint が
+            // また変わり、次の停止で補正不要になって通知まで進む（3D 側と同じ）。
+            if self.controller?.applyCameraRestrictionCorrectionIfNeeded(withVisibleRegion) == true { return }
+            // 以前はここで補正だけして停止を通知していなかったため、2D では
+            // onCameraMoveEnd が一度も呼ばれなかった。
+            self.controller?.notifyCameraMoveEnd(withVisibleRegion)
         }
-        cameraRestrictionWorkItem = workItem
+        cameraMoveEndWorkItem = workItem
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + cameraRestrictionDebounceSeconds,
+            deadline: .now() + cameraMoveEndDebounceSeconds,
             execute: workItem
         )
     }
