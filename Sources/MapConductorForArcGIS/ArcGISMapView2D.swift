@@ -254,6 +254,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
     private let serviceRegistrations = MapServiceRegistrations()
     /// タイル方式マーカーのラスターレイヤ（3D の同名プロパティと同じ役割）。
     private var currentMarkerTileRasterLayer: RasterLayerState?
+    /// 直近の content のラスターレイヤ。マーカーのタイル層だけが変わったときに合流し直すため。
+    private var contentRasterLayers: [RasterLayerState] = []
 
     /// マーカークラスタリング等のプラグインへ公開する描画 capability。
     ///
@@ -529,7 +531,11 @@ private final class ArcGISMapView2DModel: ObservableObject {
         // ここが無いと updateTileLayer が作った RasterLayerState は捨てられ、
         // タイル担当のマーカーが地図に載らない。
         markerController.markerTileRasterLayerCallback = { [weak self] state in
-            self?.currentMarkerTileRasterLayer = state
+            guard let self else { return }
+            self.currentMarkerTileRasterLayer = state
+            // マーカーの変化で層だけが作り直されたときは content の同期が来ない。
+            // ここで流さないと、次に画面が描き直されるまで古いタイルのまま残る。
+            self.syncRasterLayers()
         }
         // 投影は**必ず入れ物の座標へ畳む**こと。`container.screenPoint` は内側の
         // `MapView` の座標を返し、傾いているとき（と、かつて常時 200% だったとき）は
@@ -675,6 +681,12 @@ private final class ArcGISMapView2DModel: ObservableObject {
         }
     }
 
+    /// content のラスターレイヤに、タイル方式マーカーの層を合流させて流す。
+    private func syncRasterLayers() {
+        let tileLayer = currentMarkerTileRasterLayer.map { [$0] } ?? []
+        overlayScope?.rasterLayerCollector.sync(contentRasterLayers + tileLayer)
+    }
+
     func updateContent(_ content: MapViewContent) async {
         guard let controller else { return }
         // 3D (ArcGISMapView.updateContent) と同じ並び。tilingOptions を渡さないと
@@ -695,9 +707,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
         // タイル方式マーカーのラスターレイヤを content のレイヤに合流させる
         // （syncMarkers が先。その中で markerTileRasterLayerCallback が発火して
         // currentMarkerTileRasterLayer が更新される）。
-        let tileLayer = currentMarkerTileRasterLayer.map { RasterLayer(state: $0) }
-        let allRasterLayers = content.rasterLayers + (tileLayer.map { [$0] } ?? [])
-        overlayScope?.rasterLayerCollector.sync(allRasterLayers.map { $0.state })
+        contentRasterLayers = content.rasterLayers.map { $0.state }
+        syncRasterLayers()
         syncInfoBubbles(content.infoBubbles)
     }
 }
