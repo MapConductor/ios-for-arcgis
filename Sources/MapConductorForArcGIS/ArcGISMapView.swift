@@ -213,7 +213,11 @@ private struct ArcGISMapViewBody: View {
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
             }
 
-            InfoBubbleContainerRepresentable(container: model.infoBubbleContainer)
+            InfoBubbleContainerRepresentable(
+                container: model.infoBubbleContainer,
+                bubbles: content.infoBubbles,
+                sync: { [weak model] bubbles in model?.syncInfoBubbles(bubbles) }
+            )
         } topContent: {
             if !state.uiSettings.scrollGesture {
                 Color.clear
@@ -246,11 +250,22 @@ private extension MapViewContent {
     }
 }
 
+/// 吹き出しを載せるコンテナ。``updateUIView`` で**毎回**吹き出しを同期する。
+///
+/// 地図側の `updateContent` は `.task(id: identityFingerprint)` でしか走らず、指紋は
+/// 吹き出しの id しか見ていない。中身や色だけが変わっても task は再実行されないので、
+/// 以前は古い吹き出しが残った。ここは body が評価されるたびに呼ばれるので、中身の
+/// 差し替えはここで拾う（`InfoBubbleOverlayCoordinator` は id ごとにホストを使い回し、
+/// `rootView` を差し替えるだけなので、毎回呼んでも作り直しは起きない）。
 private struct InfoBubbleContainerRepresentable: UIViewRepresentable {
     let container: PassthroughContainerView
+    let bubbles: [InfoBubble]
+    let sync: @MainActor ([InfoBubble]) -> Void
 
     func makeUIView(context: Context) -> PassthroughContainerView { container }
-    func updateUIView(_ uiView: PassthroughContainerView, context: Context) {}
+    func updateUIView(_ uiView: PassthroughContainerView, context: Context) {
+        sync(bubbles)
+    }
 }
 
 @MainActor
