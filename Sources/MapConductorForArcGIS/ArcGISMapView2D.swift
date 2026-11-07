@@ -508,6 +508,17 @@ private final class ArcGISMapView2DModel: ObservableObject {
             strategyMarkerControllerProvider: { [weak self] in self?.strategyManager.controller }
         )
         self.controller = controller
+        // Many polygons are drawn into raster tiles and shown as one tiled layer
+        // (under the graphics overlays); taps still resolve against the original shapes.
+        let polygonTiler = PolygonTiler()
+        polygonTiler.onTemplate = { [weak raster] template, tileSize in
+            if let template {
+                await raster?.upsert(state: PolygonTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await raster?.removeById(PolygonTiler.layerId)
+            }
+        }
+        controller.polygonController.tiler = polygonTiler
         controller.onVisualTiltChanged = { [weak self] tilt in
             guard let self else { return }
             self.visualTilt = tilt
@@ -725,6 +736,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
         await controller.markerController.syncMarkers(content.markers)
         overlayScope?.polylineCollector.sync(content.polylines.map { $0.state })
         overlayScope?.polygonCollector.sync(content.polygons.map { $0.state })
+        controller.polygonController.tiler?.refreshIfServerMoved()
         for handler in content.polygonSyncHandlers {
             let hullController = hullPolygonController
             handler.bindPolygonSync { [weak hullController] states in
