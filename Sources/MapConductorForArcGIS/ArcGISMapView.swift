@@ -502,6 +502,7 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: container.scene),
             rasterLayerController: raster,
+            serviceRegistry: state.serviceRegistry
         )
         self.controller = controller
 
@@ -788,6 +789,17 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         connectStrategyRendering(nil)
     }
 
+    /// `clearOverlays()` から呼ばれる。strategy は接続したまま、描いたマーカーだけを消す。
+    /// 同じインスタンスの一覧が送られている間は描かず、顔ぶれが変わるか作り直された state が
+    /// 来たら描き直す（StrategyMarkerManager.clearMarkers・オーバーレイのコレクタと同じ）。
+    func clearMarkers() async {
+        strategyClearedUntilListChanges = true
+        await strategyMarkerController?.clear()
+    }
+
+    /// ``clearMarkers()`` の後、一覧が変わるまで描かない印。
+    private var strategyClearedUntilListChanges = false
+
     func beginContentPass() {
         strategyConnectedThisPass = false
     }
@@ -806,6 +818,7 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
                 let renderer = ArcGISMarkerRenderer(markerLayer: markerLayer, container: container)
                 strategyMarkerRenderer = renderer
                 strategyMarkerController = ArcGISStrategyController(strategy: strategy, renderer: renderer)
+                strategyClearedUntilListChanges = false
                 // find() の android 同等 screen 空間判定用に geo→screen 投影を注入する。
                 strategyMarkerController?.markerProjector = { [weak self] geo in
                     guard let proxy = self?.container.proxy?.proxy else { return nil }
@@ -855,6 +868,10 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             newStatesById[state.id] = state
         }
         strategyMarkerStatesById = newStatesById
+        if strategyClearedUntilListChanges {
+            guard shouldSyncList else { return }
+            strategyClearedUntilListChanges = false
+        }
 
         let removedIds = oldIds.subtracting(newIds)
         for id in removedIds {
