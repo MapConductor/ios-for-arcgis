@@ -1,16 +1,20 @@
 import ArcGIS
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 import UIKit
 
 @MainActor
 final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer<Layer> {
-    private let addLayer: (Layer) -> Void
+    /// 帯の位置へ載せる（``ArcGISOverlayStacking``）。
+    private let addLayer: (Layer, OverlayStackKey) -> Void
     private let removeLayerFn: (Layer) -> Void
 
     convenience init(scene: ArcGIS.Scene) {
         self.init(
-            addLayer: { [weak scene] layer in scene?.addOperationalLayer(layer) },
+            addLayer: { [weak scene] layer, key in
+                guard let scene else { return }
+                ArcGISOverlayStacking.add(layer, key, to: scene)
+            },
             removeLayer: { [weak scene] layer in scene?.removeOperationalLayer(layer) },
             insertLayer: { [weak scene] layer, above in
                 guard let scene else { return }
@@ -25,7 +29,10 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
 
     convenience init(map: ArcGIS.Map) {
         self.init(
-            addLayer: { [weak map] layer in map?.addOperationalLayer(layer) },
+            addLayer: { [weak map] layer, key in
+                guard let map else { return }
+                ArcGISOverlayStacking.add(layer, key, to: map)
+            },
             removeLayer: { [weak map] layer in map?.removeOperationalLayer(layer) },
             insertLayer: { [weak map] layer, above in
                 guard let map else { return }
@@ -42,7 +49,7 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
     private let insertLayerAbove: (Layer, Layer) -> Void
 
     init(
-        addLayer: @escaping (Layer) -> Void,
+        addLayer: @escaping (Layer, OverlayStackKey) -> Void,
         removeLayer: @escaping (Layer) -> Void,
         insertLayer: @escaping (Layer, Layer) -> Void
     ) {
@@ -67,6 +74,7 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
         guard let old = entity.layer else { return await createLayer(state: entity.state) }
         guard let layer = makeLayer(from: entity.state) else { return nil }
         apply(state: entity.state, to: layer)
+        ArcGISOverlayStacking.register(layer, ArcGISOverlayStacking.rasterKey(entity.state))
         insertLayerAbove(layer, old)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.handoverSeconds) { [weak self] in
             self?.removeLayerFn(old)
@@ -81,7 +89,7 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
         if state.debug {
             NSLog("[MapConductor] RasterLayer debug mode: id=%@", state.id)
         }
-        addLayer(layer)
+        addLayer(layer, ArcGISOverlayStacking.rasterKey(state))
         return layer
     }
 
@@ -97,7 +105,7 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
             if current.state.debug {
                 NSLog("[MapConductor] RasterLayer debug mode: id=%@", current.state.id)
             }
-            addLayer(newLayer)
+            addLayer(newLayer, ArcGISOverlayStacking.rasterKey(current.state))
             return newLayer
         }
         if current.fingerPrint.debug != prev.fingerPrint.debug && current.state.debug {

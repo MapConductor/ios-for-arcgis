@@ -383,7 +383,9 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
 
         self.container = ArcGISSceneContainer(
             scene: scene,
-            graphicsOverlays: [circleLayer, polygonLayer, hullPolygonLayer, polylineLayer, markerLayer],
+            // 下から ポリゴン < サークル < ポリライン < マーカー（OverlayBand の順）。
+            // 以前はサークルがポリゴンより下だった。
+            graphicsOverlays: [polygonLayer, hullPolygonLayer, circleLayer, polylineLayer, markerLayer],
             cameraPosition: state.cameraPosition,
             baseSurface: surface,
             elevationSources: elevationSources
