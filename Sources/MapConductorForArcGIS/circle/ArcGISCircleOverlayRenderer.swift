@@ -13,7 +13,7 @@ final class ArcGISCircleOverlayRenderer: AbstractCircleOverlayRenderer<Graphic> 
     override func createCircle(state: CircleState) async -> Graphic? {
         let graphic = Graphic(geometry: makeGeometry(state), symbol: makeSymbol(state))
         graphic.setAttributeValue(state.id, forKey: "id")
-        graphic.setAttributeValue(state.zIndex ?? 0, forKey: "zIndex")
+        ArcGISGraphicsZIndex.apply(graphic, state.zIndex)
         circleLayer.addGraphic(graphic)
         return graphic
     }
@@ -31,7 +31,7 @@ final class ArcGISCircleOverlayRenderer: AbstractCircleOverlayRenderer<Graphic> 
             circle.geometry = makeGeometry(current.state)
         }
         circle.symbol = makeSymbol(current.state)
-        circle.setAttributeValue(current.state.zIndex ?? 0, forKey: "zIndex")
+        ArcGISGraphicsZIndex.apply(circle, current.state.zIndex)
         return circle
     }
 

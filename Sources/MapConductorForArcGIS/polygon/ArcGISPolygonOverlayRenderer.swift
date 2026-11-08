@@ -17,7 +17,7 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
         let resolved = await resolveHoles(state)
         let graphic = Graphic(geometry: makeGeometry(resolved), symbol: makeSymbol(resolved))
         graphic.setAttributeValue(state.id, forKey: "id")
-        graphic.setAttributeValue(state.zIndex, forKey: "zIndex")
+        ArcGISGraphicsZIndex.apply(graphic, state.zIndex)
         polygonLayer.addGraphic(graphic)
         return graphic
     }
@@ -46,7 +46,7 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
             polygon.symbol = makeSymbol(current.state)
         }
         if finger.zIndex != prevFinger.zIndex {
-            polygon.setAttributeValue(current.state.zIndex, forKey: "zIndex")
+            ArcGISGraphicsZIndex.apply(polygon, current.state.zIndex)
         }
         return polygon
     }
@@ -57,19 +57,8 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
         }
     }
 
-    override func onPostProcess() async {
-        let graphics = Array(polygonLayer.graphics)
-        guard graphics.count > 1 else { return }
-
-        let sorted = graphics.sorted {
-            (($0.attributeValue(forKey: "zIndex") as? Int) ?? 0) < (($1.attributeValue(forKey: "zIndex") as? Int) ?? 0)
-        }
-        if zip(graphics, sorted).allSatisfy({ $0 === $1 }) {
-            return
-        }
-        polygonLayer.removeAllGraphics()
-        sorted.forEach { polygonLayer.addGraphic($0) }
-    }
+    /// 重なり順は各 Graphic の zIndex が持つ（``ArcGISGraphicsZIndex``）。並べ替えは要らない。
+    override func onPostProcess() async {}
 
     // MARK: - Geometry / Symbol helpers
 
