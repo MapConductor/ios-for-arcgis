@@ -26,6 +26,9 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     let groundImageController: ArcGISGroundImageController
     let rasterLayerController: ArcGISRasterLayerController
     private let strategyMarkerControllerProvider: () -> ArcGISStrategyMarkerController?
+    /// `clearOverlays()` で strategy（クラスタリングなど）のマーカーも消すために引く。
+    /// 持ち主は state なので弱参照で持つ。
+    private weak var serviceRegistry: MapServiceRegistry?
 
     private var cameraMoveStartListener: OnCameraMoveHandler?
     private var cameraMoveListener: OnCameraMoveHandler?
@@ -59,7 +62,8 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         circleController: ArcGISCircleOverlayController,
         groundImageController: ArcGISGroundImageController,
         rasterLayerController: ArcGISRasterLayerController,
-        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil }
+        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil },
+        serviceRegistry: MapServiceRegistry? = nil
     ) {
         self.typedHolder = holder
         self.holder = AnyMapViewHolder(holder)
@@ -70,6 +74,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         self.groundImageController = groundImageController
         self.rasterLayerController = rasterLayerController
         self.strategyMarkerControllerProvider = strategyMarkerControllerProvider
+        self.serviceRegistry = serviceRegistry
     }
 
     func clearOverlays() async {
@@ -79,6 +84,8 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         await polygonController.clear()
         await circleController.clear()
         await rasterLayerController.clear()
+        // strategy（クラスタリングなど）が描いたマーカーも消す。
+        await serviceRegistry?.clearMarkerRendering()
     }
 
     func setCameraMoveStartListener(listener: OnCameraMoveHandler?) {

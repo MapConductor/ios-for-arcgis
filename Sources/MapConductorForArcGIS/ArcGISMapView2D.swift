@@ -505,7 +505,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: nil),
             rasterLayerController: raster,
-            strategyMarkerControllerProvider: { [weak self] in self?.strategyManager.controller }
+            strategyMarkerControllerProvider: { [weak self] in self?.strategyManager.controller },
+            serviceRegistry: state.serviceRegistry
         )
         self.controller = controller
         controller.onVisualTiltChanged = { [weak self] tilt in
