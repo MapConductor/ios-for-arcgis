@@ -3,17 +3,49 @@ import ArcGIS
 
 @MainActor
 final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer<ArcGISGroundImageHandle> {
-    private weak var scene: ArcGIS.Scene?
+    /// 載せ先（3D の Scene か 2D の Map）の操作レイヤーへの出し入れ。載せる位置は重なり順の帯
+    /// （``ArcGISOverlayStacking``）で決める。載せ先が無くなっていれば false。
+    private let addLayer: (Layer, OverlayStackKey) -> Bool
+    private let removeLayer: (Layer) -> Void
     private let tileServer: LocalTileServer
 
-    init(scene: ArcGIS.Scene?, tileServer: LocalTileServer = TileServerRegistry.get(forceNoStoreCache: true)) {
-        self.scene = scene
+    private init(
+        addLayer: @escaping (Layer, OverlayStackKey) -> Bool,
+        removeLayer: @escaping (Layer) -> Void,
+        tileServer: LocalTileServer
+    ) {
+        self.addLayer = addLayer
+        self.removeLayer = removeLayer
         self.tileServer = tileServer
         super.init()
     }
 
+    convenience init(scene: ArcGIS.Scene?, tileServer: LocalTileServer = TileServerRegistry.get(forceNoStoreCache: true)) {
+        self.init(
+            addLayer: { [weak scene] layer, key in
+                guard let scene else { return false }
+                ArcGISOverlayStacking.add(layer, key, to: scene)
+                return true
+            },
+            removeLayer: { [weak scene] layer in scene?.removeOperationalLayer(layer) },
+            tileServer: tileServer
+        )
+    }
+
+    /// 2D の MapView 用。以前の 2D は `scene: nil` で作っていて、GroundImage は一度も載らなかった。
+    convenience init(map: ArcGIS.Map, tileServer: LocalTileServer = TileServerRegistry.get(forceNoStoreCache: true)) {
+        self.init(
+            addLayer: { [weak map] layer, key in
+                guard let map else { return false }
+                ArcGISOverlayStacking.add(layer, key, to: map)
+                return true
+            },
+            removeLayer: { [weak map] layer in map?.removeOperationalLayer(layer) },
+            tileServer: tileServer
+        )
+    }
+
     override func createGroundImage(state: GroundImageState) async -> ArcGISGroundImageHandle? {
-        guard let scene else { return nil }
         let routeId = buildSafeRouteId(state.id)
         let provider = GroundImageTileProvider(tileSize: state.tileSize)
         provider.update(state: state, opacity: 1.0)
@@ -24,7 +56,10 @@ final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer
             return nil
         }
         updateLayer(handle.layer, state)
-        ArcGISOverlayStacking.add(handle.layer, OverlayStackKey(.groundImage), to: scene)
+        guard addLayer(handle.layer, OverlayStackKey(.groundImage)) else {
+            tileServer.unregister(routeId: routeId)
+            return nil
+        }
         return handle
     }
 
@@ -33,7 +68,6 @@ final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer
         current: GroundImageEntity<ArcGISGroundImageHandle>,
         prev: GroundImageEntity<ArcGISGroundImageHandle>
     ) async -> ArcGISGroundImageHandle? {
-        guard let scene else { return nil }
         let finger = current.fingerPrint
         let prevFinger = prev.fingerPrint
         let tileNeedsRefresh = finger.bounds != prevFinger.bounds || finger.image != prevFinger.image || finger.tileSize != prevFinger.tileSize
@@ -60,15 +94,15 @@ final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer
         ) else {
             return nil
         }
-        scene.removeOperationalLayer(groundImage.layer)
+        removeLayer(groundImage.layer)
         updateLayer(nextHandle.layer, current.state)
-        ArcGISOverlayStacking.add(nextHandle.layer, OverlayStackKey(.groundImage), to: scene)
+        guard addLayer(nextHandle.layer, OverlayStackKey(.groundImage)) else { return nil }
         return nextHandle
     }
 
     override func removeGroundImage(entity: GroundImageEntity<ArcGISGroundImageHandle>) async {
         guard let handle = entity.groundImage else { return }
-        scene?.removeOperationalLayer(handle.layer)
+        removeLayer(handle.layer)
         tileServer.unregister(routeId: handle.routeId)
     }
 

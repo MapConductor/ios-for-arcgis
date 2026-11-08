@@ -12,6 +12,10 @@ final class ArcGISGroundImageController: GroundImageController<ArcGISGroundImage
         super.init(groundImageManager: GroundImageManager<ArcGISGroundImageHandle>(), renderer: ArcGISGroundImageOverlayRenderer(scene: scene))
     }
 
+    init(map: ArcGIS.Map) {
+        super.init(groundImageManager: GroundImageManager<ArcGISGroundImageHandle>(), renderer: ArcGISGroundImageOverlayRenderer(map: map))
+    }
+
     func syncGroundImages(_ images: [MapConductorCore.GroundImage]) async {
         let newIds = Set(images.map(\.id))
         let oldIds = Set(statesById.keys)
