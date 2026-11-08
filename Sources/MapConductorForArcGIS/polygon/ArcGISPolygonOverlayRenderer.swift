@@ -89,9 +89,12 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
     }
 
     private func makeGeometry(_ state: PolygonState) -> Geometry {
-        let outer = ensureClockwiseRing(openRing(toRing(state.points, geodesic: state.geodesic)))
+        // リングは閉じてから密度化する。開いたまま渡すと閉じる辺（末尾 → 先頭）が補間されず、
+        // geodesic では直線の弦に、非 geodesic では ArcGIS の測地線の辺になる（他の辺と形が揃わない）。
+        // react-for-arcgis / android-for-arcgis と同じ（closeRing してから密度化し、最後に openRing で開く）。
+        let outer = ensureClockwiseRing(openRing(toRing(closeRing(state.points), geodesic: state.geodesic)))
         let holes = state.holes.map {
-            ensureCounterClockwise(openRing(toRing($0, geodesic: state.geodesic)))
+            ensureCounterClockwise(openRing(toRing(closeRing($0), geodesic: state.geodesic)))
         }
         let parts = ([outer] + holes).map { ring in
             MutablePart(
