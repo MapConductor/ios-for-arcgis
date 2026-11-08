@@ -505,7 +505,7 @@ private final class ArcGISMapView2DModel: ObservableObject {
             polylineController: ArcGISPolylineOverlayController(polylineLayer: polylineLayer),
             polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
-            groundImageController: ArcGISGroundImageController(scene: nil),
+            groundImageController: ArcGISGroundImageController(map: container.map),
             rasterLayerController: raster,
             strategyMarkerControllerProvider: { [weak self] in self?.strategyManager.controller },
             serviceRegistry: state.serviceRegistry
