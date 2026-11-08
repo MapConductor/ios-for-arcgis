@@ -1,5 +1,5 @@
 import ArcGIS
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 @MainActor
 final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer<ArcGISGroundImageHandle> {
@@ -24,7 +24,7 @@ final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer
             return nil
         }
         updateLayer(handle.layer, state)
-        scene.addOperationalLayer(handle.layer)
+        ArcGISOverlayStacking.add(handle.layer, OverlayStackKey(.groundImage), to: scene)
         return handle
     }
 
@@ -62,7 +62,7 @@ final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer
         }
         scene.removeOperationalLayer(groundImage.layer)
         updateLayer(nextHandle.layer, current.state)
-        scene.addOperationalLayer(nextHandle.layer)
+        ArcGISOverlayStacking.add(nextHandle.layer, OverlayStackKey(.groundImage), to: scene)
         return nextHandle
     }
 
