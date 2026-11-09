@@ -193,10 +193,10 @@ private struct ArcGISMapViewBody: View {
                         NSLog("[MapConductor][ArcGIS] SceneView onDisappear")
                         model.unbind(state: state)
                     }
-                    .task(id: content.identityFingerprint ^ model.strategyFingerprint) {
+                    .task(id: content.overlayIdentityFingerprint ^ model.strategyFingerprint) {
                         NSLog(
                             "[MapConductor][ArcGIS] content task fingerprint=%d markers=%d polylines=%d polygons=%d circles=%d groundImages=%d rasterLayers=%d infoBubbles=%d",
-                            content.identityFingerprint,
+                            content.overlayIdentityFingerprint,
                             content.markers.count,
                             content.polylines.count,
                             content.polygons.count,
@@ -230,29 +230,9 @@ private struct ArcGISMapViewBody: View {
     }
 }
 
-private extension MapViewContent {
-    /// 差分検出用のフィンガープリント。strategy 由来のマーカーは `MapViewContent` から
-    /// 外れたため、``ArcGISMapViewModel/strategyFingerprint`` を足し合わせて使う。
-    var identityFingerprint: Int {
-        var hasher = Hasher()
-        markers.forEach {
-            hasher.combine($0.id)
-            hasher.combine($0.state.position.latitude)
-            hasher.combine($0.state.position.longitude)
-        }
-        polylines.forEach { hasher.combine($0.id) }
-        polygons.forEach { hasher.combine($0.id) }
-        circles.forEach { hasher.combine($0.id) }
-        groundImages.forEach { hasher.combine($0.id) }
-        rasterLayers.forEach { hasher.combine($0.id) }
-        infoBubbles.forEach { hasher.combine($0.id) }
-        return hasher.finalize()
-    }
-}
-
 /// 吹き出しを載せるコンテナ。``updateUIView`` で**毎回**吹き出しを同期する。
 ///
-/// 地図側の `updateContent` は `.task(id: identityFingerprint)` でしか走らず、指紋は
+/// 地図側の `updateContent` は `.task(id: overlayIdentityFingerprint)` でしか走らず、指紋は
 /// 吹き出しの id しか見ていない。中身や色だけが変わっても task は再実行されないので、
 /// 以前は古い吹き出しが残った。ここは body が評価されるたびに呼ばれるので、中身の
 /// 差し替えはここで拾う（`InfoBubbleOverlayCoordinator` は id ごとにホストを使い回し、
@@ -383,7 +363,9 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
 
         self.container = ArcGISSceneContainer(
             scene: scene,
-            graphicsOverlays: [circleLayer, polygonLayer, hullPolygonLayer, polylineLayer, markerLayer],
+            // 下から ポリゴン < サークル < ポリライン < マーカー（OverlayBand の順）。
+            // 以前はサークルがポリゴンより下だった。
+            graphicsOverlays: [polygonLayer, hullPolygonLayer, circleLayer, polylineLayer, markerLayer],
             cameraPosition: state.cameraPosition,
             baseSurface: surface,
             elevationSources: elevationSources
@@ -502,6 +484,7 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: container.scene),
             rasterLayerController: raster,
+            serviceRegistry: state.serviceRegistry
         )
         self.controller = controller
         // Many polygons are drawn into raster tiles and shown as one tiled layer
@@ -799,6 +782,17 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         connectStrategyRendering(nil)
     }
 
+    /// `clearOverlays()` から呼ばれる。strategy は接続したまま、描いたマーカーだけを消す。
+    /// 同じインスタンスの一覧が送られている間は描かず、顔ぶれが変わるか作り直された state が
+    /// 来たら描き直す（StrategyMarkerManager.clearMarkers・オーバーレイのコレクタと同じ）。
+    func clearMarkers() async {
+        strategyClearedUntilListChanges = true
+        await strategyMarkerController?.clear()
+    }
+
+    /// ``clearMarkers()`` の後、一覧が変わるまで描かない印。
+    private var strategyClearedUntilListChanges = false
+
     func beginContentPass() {
         strategyConnectedThisPass = false
     }
@@ -817,6 +811,7 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
                 let renderer = ArcGISMarkerRenderer(markerLayer: markerLayer, container: container)
                 strategyMarkerRenderer = renderer
                 strategyMarkerController = ArcGISStrategyController(strategy: strategy, renderer: renderer)
+                strategyClearedUntilListChanges = false
                 // find() の android 同等 screen 空間判定用に geo→screen 投影を注入する。
                 strategyMarkerController?.markerProjector = { [weak self] geo in
                     guard let proxy = self?.container.proxy?.proxy else { return nil }
@@ -866,6 +861,10 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             newStatesById[state.id] = state
         }
         strategyMarkerStatesById = newStatesById
+        if strategyClearedUntilListChanges {
+            guard shouldSyncList else { return }
+            strategyClearedUntilListChanges = false
+        }
 
         let removedIds = oldIds.subtracting(newIds)
         for id in removedIds {

@@ -7,6 +7,7 @@ import MapConductorCore
 @MainActor
 final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic> {
     let polygonLayer: GraphicsOverlay
+    private let stackOrder = ArcGISGraphicsZIndex()
 
     init(polygonLayer: GraphicsOverlay) {
         self.polygonLayer = polygonLayer
@@ -17,7 +18,7 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
         let resolved = await resolveHoles(state)
         let graphic = Graphic(geometry: makeGeometry(resolved), symbol: makeSymbol(resolved))
         graphic.setAttributeValue(state.id, forKey: "id")
-        graphic.setAttributeValue(state.zIndex, forKey: "zIndex")
+        stackOrder.place(graphic, state.zIndex)
         polygonLayer.addGraphic(graphic)
         return graphic
     }
@@ -46,7 +47,7 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
             polygon.symbol = makeSymbol(current.state)
         }
         if finger.zIndex != prevFinger.zIndex {
-            polygon.setAttributeValue(current.state.zIndex, forKey: "zIndex")
+            stackOrder.place(polygon, current.state.zIndex)
         }
         return polygon
     }
@@ -54,22 +55,12 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
     override func removePolygon(entity: PolygonEntity<Graphic>) async {
         if let polygon = entity.polygon {
             polygonLayer.removeGraphic(polygon)
+            stackOrder.forget(polygon)
         }
     }
 
-    override func onPostProcess() async {
-        let graphics = Array(polygonLayer.graphics)
-        guard graphics.count > 1 else { return }
-
-        let sorted = graphics.sorted {
-            (($0.attributeValue(forKey: "zIndex") as? Int) ?? 0) < (($1.attributeValue(forKey: "zIndex") as? Int) ?? 0)
-        }
-        if zip(graphics, sorted).allSatisfy({ $0 === $1 }) {
-            return
-        }
-        polygonLayer.removeAllGraphics()
-        sorted.forEach { polygonLayer.addGraphic($0) }
-    }
+    /// 重なり順は各 Graphic の zIndex が持つ（``ArcGISGraphicsZIndex``）。並べ替えは要らない。
+    override func onPostProcess() async {}
 
     // MARK: - Geometry / Symbol helpers
 
@@ -89,9 +80,12 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
     }
 
     private func makeGeometry(_ state: PolygonState) -> Geometry {
-        let outer = ensureClockwiseRing(openRing(toRing(state.points, geodesic: state.geodesic)))
+        // リングは閉じてから密度化する。開いたまま渡すと閉じる辺（末尾 → 先頭）が補間されず、
+        // geodesic では直線の弦に、非 geodesic では ArcGIS の測地線の辺になる（他の辺と形が揃わない）。
+        // react-for-arcgis / android-for-arcgis と同じ（closeRing してから密度化し、最後に openRing で開く）。
+        let outer = ensureClockwiseRing(openRing(toRing(closeRing(state.points), geodesic: state.geodesic)))
         let holes = state.holes.map {
-            ensureCounterClockwise(openRing(toRing($0, geodesic: state.geodesic)))
+            ensureCounterClockwise(openRing(toRing(closeRing($0), geodesic: state.geodesic)))
         }
         let parts = ([outer] + holes).map { ring in
             MutablePart(

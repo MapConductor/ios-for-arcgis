@@ -4,6 +4,7 @@ import MapConductorCore
 @MainActor
 final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graphic> {
     let polylineLayer: GraphicsOverlay
+    private let stackOrder = ArcGISGraphicsZIndex()
 
     init(polylineLayer: GraphicsOverlay) {
         self.polylineLayer = polylineLayer
@@ -13,7 +14,7 @@ final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graph
     override func createPolyline(state: PolylineState) async -> Graphic? {
         let graphic = Graphic(geometry: makeGeometry(state), symbol: makeSymbol(state))
         graphic.setAttributeValue(state.id, forKey: "id")
-        graphic.setAttributeValue(state.zIndex, forKey: "zIndex")
+        stackOrder.place(graphic, state.zIndex)
         polylineLayer.addGraphic(graphic)
         return graphic
     }
@@ -29,29 +30,21 @@ final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graph
             polyline.geometry = makeGeometry(current.state)
         }
         polyline.symbol = makeSymbol(current.state)
+        if finger.zIndex != prevFinger.zIndex {
+            stackOrder.place(polyline, current.state.zIndex)
+        }
         return polyline
     }
 
     override func removePolyline(entity: PolylineEntity<Graphic>) async {
         if let polyline = entity.polyline {
             polylineLayer.removeGraphic(polyline)
+            stackOrder.forget(polyline)
         }
     }
 
-    override func onPostProcess() async {
-        // 整列済みなら no-op（頂点ドラッグ等の高頻度 update で removeAllGraphics → 再追加による
-        // ちらつきを避ける。android-for-arcgis と同じガード）。
-        let graphics = Array(polylineLayer.graphics)
-        guard graphics.count > 1 else { return }
-        let sorted = graphics.sorted {
-            (($0.attributeValue(forKey: "zIndex") as? Int) ?? 0) < (($1.attributeValue(forKey: "zIndex") as? Int) ?? 0)
-        }
-        if zip(graphics, sorted).allSatisfy({ $0 === $1 }) {
-            return
-        }
-        polylineLayer.removeAllGraphics()
-        sorted.forEach { polylineLayer.addGraphic($0) }
-    }
+    /// 重なり順は各 Graphic の zIndex が持つ（``ArcGISGraphicsZIndex``）。並べ替えは要らない。
+    override func onPostProcess() async {}
 
     private func makeGeometry(_ state: PolylineState) -> Geometry {
         // 他プロバイダと同様、測地線・直線ともコアの共通補間で頂点列を生成し、ArcGIS には

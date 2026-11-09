@@ -9,6 +9,7 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
     private static let maxConcurrentAnimations = 30
 
     let markerLayer: GraphicsOverlay
+    private let stackOrder = ArcGISGraphicsZIndex()
     private weak var container: (any ArcGISMapContext)?
     private var markerAnimationRunners: [String: MarkerAnimationRunner] = [:]
     private var deferredAnimateAttemptsById: [String: Int] = [:]
@@ -29,6 +30,7 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
     func onAdd(data: [MarkerOverlayAddParams]) async -> [Graphic?] {
         data.map { params in
             let graphic = makeGraphic(state: params.state, bitmapIcon: params.bitmapIcon)
+            stackOrder.place(graphic, params.state.zIndex)
             markerLayer.addGraphic(graphic)
             return graphic
         }
@@ -43,14 +45,16 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
             if params.current.fingerPrint.icon != params.prev.fingerPrint.icon {
                 graphic.symbol = makeSymbol(bitmapIcon: params.bitmapIcon)
             }
-            if params.current.fingerPrint.zIndex != params.prev.fingerPrint.zIndex {
-                graphic.setAttributeValue(params.current.state.zIndex ?? 0, forKey: "zIndex")
+            // 地図に載っている Graphic（prev.marker）だけを順位表に置く。
+            if params.prev.marker != nil, params.current.fingerPrint.zIndex != params.prev.fingerPrint.zIndex {
+                stackOrder.place(graphic, params.current.state.zIndex)
             }
             return graphic
         }
     }
 
     func onRemove(data: [MarkerEntity<Graphic>]) async {
+        stackOrder.forget(data.compactMap(\.marker))
         for entity in data {
             markerAnimationRunners[entity.state.id]?.stop()
             markerAnimationRunners.removeValue(forKey: entity.state.id)
@@ -73,21 +77,8 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
         }
     }
 
-    func onPostProcess() async {
-        // zIndex 順の並べ替えが不要なら何もしない。マーカードラッグ中は update →
-        // onPostProcess が毎フレーム走るため、無条件に removeAllGraphics → 再追加すると
-        // 全マーカーがちらつく（android-for-arcgis と同じ「整列済みなら no-op」ガード）。
-        let graphics = Array(markerLayer.graphics)
-        guard graphics.count > 1 else { return }
-        let sorted = graphics.sorted {
-            (($0.attributeValue(forKey: "zIndex") as? Int) ?? 0) < (($1.attributeValue(forKey: "zIndex") as? Int) ?? 0)
-        }
-        if zip(graphics, sorted).allSatisfy({ $0 === $1 }) {
-            return
-        }
-        markerLayer.removeAllGraphics()
-        sorted.forEach { markerLayer.addGraphic($0) }
-    }
+    /// 重なり順は各 Graphic の zIndex が持つ（``ArcGISGraphicsZIndex``）。並べ替えは要らない。
+    func onPostProcess() async {}
 
     func unbind() {
         markerAnimationRunners.values.forEach { $0.stop() }
@@ -255,7 +246,6 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
             symbol: makeSymbol(bitmapIcon: bitmapIcon)
         )
         graphic.setAttributeValue(state.id, forKey: "id")
-        graphic.setAttributeValue(state.zIndex ?? 0, forKey: "zIndex")
         // 縦補正の掛け直しに使う素の寸法（tilt が変わるたびにここから再計算する）。
         graphic.setAttributeValue(Double(bitmapIcon.size.height), forKey: Self.baseHeightKey)
         graphic.setAttributeValue(
