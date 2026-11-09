@@ -23,6 +23,9 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     /// クラスタ等のプラグインが接続中に使う描画コントローラ。3D 側と同じく、
     /// 接続状況が変わるため毎回 provider から取り直す。
     private let strategyMarkerControllerProvider: () -> ArcGISStrategyMarkerController?
+    /// `clearOverlays()` で strategy（クラスタリングなど）のマーカーも消すために引く。
+    /// 持ち主は state なので弱参照で持つ。
+    private weak var serviceRegistry: MapServiceRegistry?
 
     private var cameraMoveStartListener: OnCameraMoveHandler?
     private var cameraMoveListener: OnCameraMoveHandler?
@@ -74,7 +77,8 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         circleController: ArcGISCircleOverlayController,
         groundImageController: ArcGISGroundImageController,
         rasterLayerController: ArcGISRasterLayerController,
-        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil }
+        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil },
+        serviceRegistry: MapServiceRegistry? = nil
     ) {
         self.typedHolder = holder
         self.holder = AnyMapViewHolder(holder)
@@ -85,6 +89,7 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         self.groundImageController = groundImageController
         self.rasterLayerController = rasterLayerController
         self.strategyMarkerControllerProvider = strategyMarkerControllerProvider
+        self.serviceRegistry = serviceRegistry
     }
 
     func clearOverlays() async {
@@ -94,6 +99,8 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         await polygonController.clear()
         await circleController.clear()
         await rasterLayerController.clear()
+        // strategy（クラスタリングなど）が描いたマーカーも消す。
+        await serviceRegistry?.clearMarkerRendering()
     }
 
     func setCameraMoveStartListener(listener: OnCameraMoveHandler?) { cameraMoveStartListener = listener }

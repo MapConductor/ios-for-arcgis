@@ -173,7 +173,7 @@ private struct ArcGISMapView2DBody: View {
             .onDisappear {
                 model.unbind(state: state)
             }
-            .task(id: content.identityFingerprint) {
+            .task(id: content.overlayIdentityFingerprint) {
                 await model.updateContent(content)
             }
             .task {
@@ -197,25 +197,9 @@ private struct ArcGISMapView2DBody: View {
     }
 }
 
-private extension MapViewContent {
-    var identityFingerprint: Int {
-        var hasher = Hasher()
-        markers.forEach { hasher.combine($0.id) }
-        polylines.forEach { hasher.combine($0.id) }
-        polygons.forEach { hasher.combine($0.id) }
-        circles.forEach { hasher.combine($0.id) }
-        groundImages.forEach { hasher.combine($0.id) }
-        rasterLayers.forEach { hasher.combine($0.id) }
-        // InfoBubble の増減で `updateContent` が走らないと、マーカーをタップしても
-        // バブルが同期されない（3D 側のフィンガープリントと同じく id を含める）。
-        infoBubbles.forEach { hasher.combine($0.id) }
-        return hasher.finalize()
-    }
-}
-
 /// 吹き出しを載せるコンテナ。``updateUIView`` で**毎回**吹き出しを同期する。
 ///
-/// 地図側の `updateContent` は `.task(id: identityFingerprint)` でしか走らず、指紋は
+/// 地図側の `updateContent` は `.task(id: overlayIdentityFingerprint)` でしか走らず、指紋は
 /// 吹き出しの id しか見ていない。中身や色だけが変わっても task は再実行されないので、
 /// 以前は古い吹き出しが残った。ここは body が評価されるたびに呼ばれるので、中身の
 /// 差し替えはここで拾う（`InfoBubbleOverlayCoordinator` は id ごとにホストを使い回し、
@@ -347,7 +331,9 @@ private final class ArcGISMapView2DModel: ObservableObject {
 
         self.container = ArcGISMapContainer2D(
             map: map,
-            graphicsOverlays: [circleLayer, polygonLayer, hullPolygonLayer, polylineLayer, markerLayer],
+            // 下から ポリゴン < サークル < ポリライン < マーカー（OverlayBand の順）。
+            // 以前はサークルがポリゴンより下だった。
+            graphicsOverlays: [polygonLayer, hullPolygonLayer, circleLayer, polylineLayer, markerLayer],
             cameraPosition: state.cameraPosition
         )
     }
@@ -503,9 +489,10 @@ private final class ArcGISMapView2DModel: ObservableObject {
             polylineController: ArcGISPolylineOverlayController(polylineLayer: polylineLayer),
             polygonController: ArcGISPolygonOverlayController(polygonLayer: polygonLayer),
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
-            groundImageController: ArcGISGroundImageController(scene: nil),
+            groundImageController: ArcGISGroundImageController(map: container.map),
             rasterLayerController: raster,
-            strategyMarkerControllerProvider: { [weak self] in self?.strategyManager.controller }
+            strategyMarkerControllerProvider: { [weak self] in self?.strategyManager.controller },
+            serviceRegistry: state.serviceRegistry
         )
         self.controller = controller
         // Many polygons are drawn into raster tiles and shown as one tiled layer
