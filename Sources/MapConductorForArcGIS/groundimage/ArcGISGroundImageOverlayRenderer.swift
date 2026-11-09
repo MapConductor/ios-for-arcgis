@@ -27,7 +27,11 @@ final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer
                 ArcGISOverlayStacking.add(layer, key, to: scene)
                 return true
             },
-            removeLayer: { [weak scene] layer in scene?.removeOperationalLayer(layer) },
+            removeLayer: { [weak scene] layer in
+                scene?.removeOperationalLayer(layer)
+                // 取得中のタイル要求が片付くまで層を生かしておく（``ArcGISRetiredLayers``）。
+                ArcGISRetiredLayers.retire(layer)
+            },
             tileServer: tileServer
         )
     }
@@ -40,7 +44,11 @@ final class ArcGISGroundImageOverlayRenderer: AbstractGroundImageOverlayRenderer
                 ArcGISOverlayStacking.add(layer, key, to: map)
                 return true
             },
-            removeLayer: { [weak map] layer in map?.removeOperationalLayer(layer) },
+            removeLayer: { [weak map] layer in
+                map?.removeOperationalLayer(layer)
+                // 取得中のタイル要求が片付くまで層を生かしておく（``ArcGISRetiredLayers``）。
+                ArcGISRetiredLayers.retire(layer)
+            },
             tileServer: tileServer
         )
     }

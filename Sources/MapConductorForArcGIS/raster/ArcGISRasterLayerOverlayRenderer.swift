@@ -15,7 +15,11 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
                 guard let scene else { return }
                 ArcGISOverlayStacking.add(layer, key, to: scene)
             },
-            removeLayer: { [weak scene] layer in scene?.removeOperationalLayer(layer) },
+            removeLayer: { [weak scene] layer in
+                scene?.removeOperationalLayer(layer)
+                // 取得中のタイル要求が片付くまで層を生かしておく（``ArcGISRetiredLayers``）。
+                ArcGISRetiredLayers.retire(layer)
+            },
             insertLayer: { [weak scene] layer, above in
                 guard let scene else { return }
                 if let index = scene.operationalLayers.firstIndex(where: { $0 === above }) {
@@ -33,7 +37,11 @@ final class ArcGISRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
                 guard let map else { return }
                 ArcGISOverlayStacking.add(layer, key, to: map)
             },
-            removeLayer: { [weak map] layer in map?.removeOperationalLayer(layer) },
+            removeLayer: { [weak map] layer in
+                map?.removeOperationalLayer(layer)
+                // 取得中のタイル要求が片付くまで層を生かしておく（``ArcGISRetiredLayers``）。
+                ArcGISRetiredLayers.retire(layer)
+            },
             insertLayer: { [weak map] layer, above in
                 guard let map else { return }
                 if let index = map.operationalLayers.firstIndex(where: { $0 === above }) {
