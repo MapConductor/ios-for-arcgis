@@ -4,6 +4,7 @@ import MapConductorCore
 @MainActor
 final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graphic> {
     let polylineLayer: GraphicsOverlay
+    private let stackOrder = ArcGISGraphicsZIndex()
 
     init(polylineLayer: GraphicsOverlay) {
         self.polylineLayer = polylineLayer
@@ -13,7 +14,7 @@ final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graph
     override func createPolyline(state: PolylineState) async -> Graphic? {
         let graphic = Graphic(geometry: makeGeometry(state), symbol: makeSymbol(state))
         graphic.setAttributeValue(state.id, forKey: "id")
-        ArcGISGraphicsZIndex.apply(graphic, state.zIndex)
+        stackOrder.place(graphic, state.zIndex)
         polylineLayer.addGraphic(graphic)
         return graphic
     }
@@ -30,7 +31,7 @@ final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graph
         }
         polyline.symbol = makeSymbol(current.state)
         if finger.zIndex != prevFinger.zIndex {
-            ArcGISGraphicsZIndex.apply(polyline, current.state.zIndex)
+            stackOrder.place(polyline, current.state.zIndex)
         }
         return polyline
     }
@@ -38,6 +39,7 @@ final class ArcGISPolylineOverlayRenderer: AbstractPolylineOverlayRenderer<Graph
     override func removePolyline(entity: PolylineEntity<Graphic>) async {
         if let polyline = entity.polyline {
             polylineLayer.removeGraphic(polyline)
+            stackOrder.forget(polyline)
         }
     }
 

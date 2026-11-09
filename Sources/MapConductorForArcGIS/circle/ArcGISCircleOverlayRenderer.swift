@@ -4,6 +4,7 @@ import MapConductorCore
 @MainActor
 final class ArcGISCircleOverlayRenderer: AbstractCircleOverlayRenderer<Graphic> {
     let circleLayer: GraphicsOverlay
+    private let stackOrder = ArcGISGraphicsZIndex()
 
     init(circleLayer: GraphicsOverlay) {
         self.circleLayer = circleLayer
@@ -13,7 +14,7 @@ final class ArcGISCircleOverlayRenderer: AbstractCircleOverlayRenderer<Graphic> 
     override func createCircle(state: CircleState) async -> Graphic? {
         let graphic = Graphic(geometry: makeGeometry(state), symbol: makeSymbol(state))
         graphic.setAttributeValue(state.id, forKey: "id")
-        ArcGISGraphicsZIndex.apply(graphic, state.zIndex)
+        stackOrder.place(graphic, state.zIndex)
         circleLayer.addGraphic(graphic)
         return graphic
     }
@@ -31,13 +32,14 @@ final class ArcGISCircleOverlayRenderer: AbstractCircleOverlayRenderer<Graphic> 
             circle.geometry = makeGeometry(current.state)
         }
         circle.symbol = makeSymbol(current.state)
-        ArcGISGraphicsZIndex.apply(circle, current.state.zIndex)
+        stackOrder.place(circle, current.state.zIndex)
         return circle
     }
 
     override func removeCircle(entity: CircleEntity<Graphic>) async {
         if let circle = entity.circle {
             circleLayer.removeGraphic(circle)
+            stackOrder.forget(circle)
         }
     }
 

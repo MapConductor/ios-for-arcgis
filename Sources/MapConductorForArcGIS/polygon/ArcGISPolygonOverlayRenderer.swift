@@ -7,6 +7,7 @@ import MapConductorCore
 @MainActor
 final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic> {
     let polygonLayer: GraphicsOverlay
+    private let stackOrder = ArcGISGraphicsZIndex()
 
     init(polygonLayer: GraphicsOverlay) {
         self.polygonLayer = polygonLayer
@@ -17,7 +18,7 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
         let resolved = await resolveHoles(state)
         let graphic = Graphic(geometry: makeGeometry(resolved), symbol: makeSymbol(resolved))
         graphic.setAttributeValue(state.id, forKey: "id")
-        ArcGISGraphicsZIndex.apply(graphic, state.zIndex)
+        stackOrder.place(graphic, state.zIndex)
         polygonLayer.addGraphic(graphic)
         return graphic
     }
@@ -46,7 +47,7 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
             polygon.symbol = makeSymbol(current.state)
         }
         if finger.zIndex != prevFinger.zIndex {
-            ArcGISGraphicsZIndex.apply(polygon, current.state.zIndex)
+            stackOrder.place(polygon, current.state.zIndex)
         }
         return polygon
     }
@@ -54,6 +55,7 @@ final class ArcGISPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<Graphic
     override func removePolygon(entity: PolygonEntity<Graphic>) async {
         if let polygon = entity.polygon {
             polygonLayer.removeGraphic(polygon)
+            stackOrder.forget(polygon)
         }
     }
 
