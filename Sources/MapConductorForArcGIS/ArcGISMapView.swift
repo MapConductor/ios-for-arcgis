@@ -193,10 +193,10 @@ private struct ArcGISMapViewBody: View {
                         NSLog("[MapConductor][ArcGIS] SceneView onDisappear")
                         model.unbind(state: state)
                     }
-                    .task(id: content.identityFingerprint ^ model.strategyFingerprint) {
+                    .task(id: content.overlayIdentityFingerprint ^ model.strategyFingerprint) {
                         NSLog(
                             "[MapConductor][ArcGIS] content task fingerprint=%d markers=%d polylines=%d polygons=%d circles=%d groundImages=%d rasterLayers=%d infoBubbles=%d",
-                            content.identityFingerprint,
+                            content.overlayIdentityFingerprint,
                             content.markers.count,
                             content.polylines.count,
                             content.polygons.count,
@@ -230,29 +230,9 @@ private struct ArcGISMapViewBody: View {
     }
 }
 
-private extension MapViewContent {
-    /// 差分検出用のフィンガープリント。strategy 由来のマーカーは `MapViewContent` から
-    /// 外れたため、``ArcGISMapViewModel/strategyFingerprint`` を足し合わせて使う。
-    var identityFingerprint: Int {
-        var hasher = Hasher()
-        markers.forEach {
-            hasher.combine($0.id)
-            hasher.combine($0.state.position.latitude)
-            hasher.combine($0.state.position.longitude)
-        }
-        polylines.forEach { hasher.combine($0.id) }
-        polygons.forEach { hasher.combine($0.id) }
-        circles.forEach { hasher.combine($0.id) }
-        groundImages.forEach { hasher.combine($0.id) }
-        rasterLayers.forEach { hasher.combine($0.id) }
-        infoBubbles.forEach { hasher.combine($0.id) }
-        return hasher.finalize()
-    }
-}
-
 /// 吹き出しを載せるコンテナ。``updateUIView`` で**毎回**吹き出しを同期する。
 ///
-/// 地図側の `updateContent` は `.task(id: identityFingerprint)` でしか走らず、指紋は
+/// 地図側の `updateContent` は `.task(id: overlayIdentityFingerprint)` でしか走らず、指紋は
 /// 吹き出しの id しか見ていない。中身や色だけが変わっても task は再実行されないので、
 /// 以前は古い吹き出しが残った。ここは body が評価されるたびに呼ばれるので、中身の
 /// 差し替えはここで拾う（`InfoBubbleOverlayCoordinator` は id ごとにホストを使い回し、
