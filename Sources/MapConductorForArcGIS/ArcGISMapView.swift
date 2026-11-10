@@ -498,6 +498,17 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             }
         }
         controller.polygonController.tiler = polygonTiler
+        // Many polylines likewise, in their own raster layer in the polyline band
+        // (under the natively drawn polylines); taps still resolve against the original lines.
+        let polylineTiler = PolylineTiler()
+        polylineTiler.onTemplate = { [weak raster] template, tileSize in
+            if let template {
+                await raster?.upsert(state: PolylineTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await raster?.removeById(PolylineTiler.layerId)
+            }
+        }
+        controller.polylineController.tiler = polylineTiler
 
         // クリックカスケードとスロット解決がここから kind で引く。
         // **登録を忘れるとタップに反応しなくなる。**
@@ -918,6 +929,8 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         overlayScope?.polylineCollector.sync(content.polylines.map { $0.state })
         overlayScope?.polygonCollector.sync(content.polygons.map { $0.state })
         controller.polygonController.tiler?.refreshIfServerMoved()
+        if controller.polylineController.tiler?.setOptions(content.polylineTilingOptions) == true { overlayScope?.polylineCollector.flush() }
+        controller.polylineController.tiler?.refreshIfServerMoved()
         for handler in content.polygonSyncHandlers {
             let hullController = hullPolygonController
             handler.bindPolygonSync { [weak hullController] states in
