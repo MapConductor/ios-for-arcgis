@@ -52,7 +52,7 @@ final class ArcGISGraphicsZIndexTests: XCTestCase {
             MarkerDrawOrder.key(
                 zIndex: nil,
                 position: self.pt(lat, 139),
-                frame: MarkerDrawOrder.Frame(heading: heading, originLongitude: 139)
+                frame: MarkerDrawOrder.Frame(headingDegrees: heading, originLongitude: 139)
             )
         }
         let south = Graphic()
