@@ -509,6 +509,15 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             }
         }
         controller.polylineController.tiler = polylineTiler
+        let circleTiler = CircleTiler()
+        circleTiler.onTemplate = { [weak raster] template, tileSize in
+            if let template {
+                await raster?.upsert(state: CircleTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await raster?.removeById(CircleTiler.layerId)
+            }
+        }
+        controller.circleController.tiler = circleTiler
 
         // クリックカスケードとスロット解決がここから kind で引く。
         // **登録を忘れるとタップに反応しなくなる。**
@@ -930,7 +939,9 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         overlayScope?.polygonCollector.sync(content.polygons.map { $0.state })
         controller.polygonController.tiler?.refreshIfServerMoved()
         if controller.polylineController.tiler?.setOptions(content.polylineTilingOptions) == true { overlayScope?.polylineCollector.flush() }
+        if controller.circleController.tiler?.setOptions(content.circleTilingOptions) == true { overlayScope?.circleCollector.flush() }
         controller.polylineController.tiler?.refreshIfServerMoved()
+        controller.circleController.tiler?.refreshIfServerMoved()
         for handler in content.polygonSyncHandlers {
             let hullController = hullPolygonController
             handler.bindPolygonSync { [weak hullController] states in

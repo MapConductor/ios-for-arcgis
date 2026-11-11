@@ -517,6 +517,15 @@ private final class ArcGISMapView2DModel: ObservableObject {
             }
         }
         controller.polylineController.tiler = polylineTiler
+        let circleTiler = CircleTiler()
+        circleTiler.onTemplate = { [weak raster] template, tileSize in
+            if let template {
+                await raster?.upsert(state: CircleTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await raster?.removeById(CircleTiler.layerId)
+            }
+        }
+        controller.circleController.tiler = circleTiler
         controller.onVisualTiltChanged = { [weak self] tilt in
             guard let self else { return }
             self.visualTilt = tilt
@@ -736,7 +745,9 @@ private final class ArcGISMapView2DModel: ObservableObject {
         overlayScope?.polygonCollector.sync(content.polygons.map { $0.state })
         controller.polygonController.tiler?.refreshIfServerMoved()
         if controller.polylineController.tiler?.setOptions(content.polylineTilingOptions) == true { overlayScope?.polylineCollector.flush() }
+        if controller.circleController.tiler?.setOptions(content.circleTilingOptions) == true { overlayScope?.circleCollector.flush() }
         controller.polylineController.tiler?.refreshIfServerMoved()
+        controller.circleController.tiler?.refreshIfServerMoved()
         for handler in content.polygonSyncHandlers {
             let hullController = hullPolygonController
             handler.bindPolygonSync { [weak hullController] states in
