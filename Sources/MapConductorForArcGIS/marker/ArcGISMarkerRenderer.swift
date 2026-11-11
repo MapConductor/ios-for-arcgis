@@ -3,7 +3,7 @@ import ArcGIS
 import UIKit
 
 @MainActor
-final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
+final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol, MarkerDrawOrderFrameReceiver {
     typealias ActualMarker = Graphic
 
     private static let maxConcurrentAnimations = 30
@@ -11,9 +11,22 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
     let markerLayer: GraphicsOverlay
     private let stackOrder = ArcGISGraphicsZIndex()
 
-    /// 同じ zIndex の中の順位。南・西ほど上（``MarkerDrawOrder``）。
-    private static func tie(_ state: MarkerState) -> Double {
-        MarkerDrawOrder.key(zIndex: nil, position: state.position)
+    /// 重なり順を出すときの地図の向き（``MarkerDrawOrder``）。回すとコントローラが差し替える。
+    private var drawOrderFrame: MarkerDrawOrder.Frame = .northUp
+
+    /// 同じ zIndex の中の順位。回したあとの画面で下・左ほど上（``MarkerDrawOrder``）。
+    private func tie(_ state: MarkerState) -> Double {
+        MarkerDrawOrder.key(zIndex: nil, position: state.position, frame: drawOrderFrame)
+    }
+
+    /// 回したら、同じ zIndex の中の順位を付け直す。3D は GraphicsOverlay の並びでも決まるので
+    /// 並びもそろえる（``onPostProcess()``）。
+    func onDrawOrderFrameChanged(_ frame: MarkerDrawOrder.Frame, entities: [MarkerEntity<Graphic>]) async {
+        drawOrderFrame = frame
+        stackOrder.retie(entities.compactMap { entity in
+            entity.marker.map { (graphic: $0, tie: tie(entity.state)) }
+        })
+        syncOverlayOrderIfNeeded()
     }
     private weak var container: (any ArcGISMapContext)?
     private var markerAnimationRunners: [String: MarkerAnimationRunner] = [:]
@@ -35,7 +48,7 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
     func onAdd(data: [MarkerOverlayAddParams]) async -> [Graphic?] {
         data.map { params in
             let graphic = makeGraphic(state: params.state, bitmapIcon: params.bitmapIcon)
-            stackOrder.place(graphic, params.state.zIndex, tie: Self.tie(params.state))
+            stackOrder.place(graphic, params.state.zIndex, tie: tie(params.state))
             markerLayer.addGraphic(graphic)
             return graphic
         }
@@ -53,7 +66,7 @@ final class ArcGISMarkerRenderer: MarkerOverlayRendererProtocol {
             // 地図に載っている Graphic（prev.marker）だけを順位表に置く。同じ zIndex の中の順位は
             // 位置で決まるので、位置が変わっても置き直す（変わっていなければ place が何もしない）。
             if params.prev.marker != nil {
-                stackOrder.place(graphic, params.current.state.zIndex, tie: Self.tie(params.current.state))
+                stackOrder.place(graphic, params.current.state.zIndex, tie: tie(params.current.state))
             }
             return graphic
         }

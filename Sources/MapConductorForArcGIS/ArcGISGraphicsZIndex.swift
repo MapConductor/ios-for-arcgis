@@ -44,8 +44,8 @@ final class ArcGISGraphicsZIndex {
     /// いちばん上（渡された順）。置いてある Graphic の zIndex が変わったときは、最初に渡された
     /// 順を保ったまま移す。
     ///
-    /// `tie` は同じ zIndex の中の順位（大きいほど上）。マーカーは南・西ほど上
-    /// （``MarkerDrawOrder``）にするため位置から求めて渡す。ほかは 0 のまま（渡された順）。
+    /// `tie` は同じ zIndex の中の順位（大きいほど上）。マーカーは画面で下・左ほど上
+    /// （``MarkerDrawOrder``）にするため位置と地図の向きから求めて渡す。ほかは 0 のまま（渡された順）。
     func place(_ graphic: Graphic, _ zIndex: Int?, tie: Double = 0) {
         let z = zIndex ?? 0
         let entry: Entry
@@ -63,6 +63,27 @@ final class ArcGISGraphicsZIndex {
         let at = insertionPoint(entry)
         entries.insert(entry, at: at)
         assignRanks(from: at)
+    }
+
+    /// 置いてある Graphic の `tie` をまとめて差し替え、並べ直す。地図を回してマーカーの
+    /// 順位（``MarkerDrawOrder``）が一斉に変わるときに使う。1 つずつ ``place(_:_:tie:)`` すると
+    /// ずらしが件数の 2 乗になるので、1 回並べ替えて順位を振り直す。置いていない Graphic は無視する。
+    func retie(_ ties: [(graphic: Graphic, tie: Double)]) {
+        var changed = false
+        for (graphic, tie) in ties {
+            guard let entry = byGraphic[ObjectIdentifier(graphic)], entry.tie != tie else { continue }
+            entry.tie = tie
+            changed = true
+        }
+        guard changed else { return }
+        entries.sort(by: precedes)
+        var previous = -1
+        for entry in entries {
+            // 順位は狭義単調増加なら何でもよい。前より大きいままなら書き換えない。
+            if entry.rank <= previous { entry.rank = previous + 1 }
+            if entry.graphic.zIndex != entry.rank { entry.graphic.zIndex = entry.rank }
+            previous = entry.rank
+        }
     }
 
     /// `graphic` を外す。順位は詰めない（残りの並びはそのまま正しい）。
