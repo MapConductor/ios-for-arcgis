@@ -27,6 +27,24 @@ final class ArcGISGraphicsZIndexTests: XCTestCase {
         return u > l
     }
 
+    /// マーカーは同じ zIndex なら南が上。足した順には左右されず、zIndex を上げた方が勝つ。
+    func testMarkersStackSouthInFrontAtTheSameZIndex() {
+        let order = ArcGISGraphicsZIndex()
+        let tie = { (lat: Double) in MarkerDrawOrder.key(zIndex: nil, position: self.pt(lat, 139)) }
+        let south = Graphic()
+        let north = Graphic()
+        let raised = Graphic()
+        order.place(south, nil, tie: tie(35.0))
+        order.place(north, nil, tie: tie(35.1))
+        XCTAssertGreaterThan(south.zIndex, north.zIndex, "south added first must still draw above north")
+        order.place(raised, 1, tie: tie(36.0))
+        XCTAssertGreaterThan(raised.zIndex, south.zIndex, "zIndex=1 must draw above zIndex=nil")
+        // 北のマーカーが南へ動けば上に来る。
+        order.place(north, nil, tie: tie(34.9))
+        XCTAssertGreaterThan(north.zIndex, south.zIndex)
+        XCTAssertGreaterThan(raised.zIndex, north.zIndex)
+    }
+
     func testPolygonsStackByZIndexWhateverOrderTheyArrive() async throws {
         let overlay = GraphicsOverlay()
         let renderer = ArcGISPolygonOverlayRenderer(polygonLayer: overlay)

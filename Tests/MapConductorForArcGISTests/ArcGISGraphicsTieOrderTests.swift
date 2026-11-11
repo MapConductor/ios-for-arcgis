@@ -6,7 +6,7 @@ import XCTest
 
 @testable import MapConductorForArcGIS
 
-/// 同じ zIndex の Graphic は、渡された順に重なること。
+/// 同じ zIndex の Graphic は、渡された順に重なること（マーカーは南が上。``MarkerDrawOrder``）。
 ///
 /// ArcGIS は同じ `Graphic.zIndex` の描く順を保証しない（API リファレンスは「通常は」足した順）。
 /// android-for-arcgis ではタブレットの 2D で、zIndex=0 の 2 つの間に zIndex=1 が挟まると後から
@@ -53,19 +53,25 @@ final class ArcGISGraphicsTieOrderTests: XCTestCase {
         assertSandwich(try XCTUnwrap(aRaw), try XCTUnwrap(zRaw), try XCTUnwrap(bRaw), "polyline")
     }
 
-    func testMarkersWithEqualZIndexKeepTheOrderPassed() async throws {
+    /// マーカーは同じ zIndex なら南が上（``MarkerDrawOrder``）。渡された順ではない。
+    /// 3D は GraphicsOverlay の並びで描くので、onPostProcess の後は並びも同じ順になっていること。
+    func testMarkersWithEqualZIndexStackSouthInFront() async throws {
         let overlay = GraphicsOverlay()
         let context = StubMapContext()
         let renderer = ArcGISMarkerRenderer(markerLayer: overlay, container: context)
         let icon = DefaultMarkerIcon().toBitmapIcon()
         let states = [
-            MarkerState(position: pt(35.0, 139.0), id: "A"),
-            MarkerState(position: pt(35.0, 139.001), id: "Z", zIndex: 1),
-            MarkerState(position: pt(35.0, 139.002), id: "B"),
+            MarkerState(position: pt(35.0, 139.0), id: "Z", zIndex: 1),
+            MarkerState(position: pt(35.001, 139.0), id: "North"),
+            MarkerState(position: pt(35.0, 139.002), id: "South"),
         ]
         let graphics = await renderer.onAdd(data: states.map { MarkerOverlayAddParams(state: $0, bitmapIcon: icon) })
         let g = try graphics.map { try XCTUnwrap($0) }
-        assertSandwich(g[0], g[1], g[2], "marker")
+        let (z, north, south) = (g[0], g[1], g[2])
+        XCTAssertLessThan(north.zIndex, south.zIndex, "equal zIndex: south must draw above north")
+        XCTAssertLessThan(south.zIndex, z.zIndex, "zIndex=1 must stay above both, though passed first")
+        await renderer.onPostProcess()
+        XCTAssertTrue(overlay.graphics.elementsEqual([north, south, z], by: ===), "overlay list must follow the draw order")
         _ = context
     }
 
