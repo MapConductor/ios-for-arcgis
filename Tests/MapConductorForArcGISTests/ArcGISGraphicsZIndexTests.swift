@@ -27,6 +27,51 @@ final class ArcGISGraphicsZIndexTests: XCTestCase {
         return u > l
     }
 
+    /// マーカーは同じ zIndex なら南が上。足した順には左右されず、zIndex を上げた方が勝つ。
+    func testMarkersStackSouthInFrontAtTheSameZIndex() {
+        let order = ArcGISGraphicsZIndex()
+        let tie = { (lat: Double) in MarkerDrawOrder.key(zIndex: nil, position: self.pt(lat, 139)) }
+        let south = Graphic()
+        let north = Graphic()
+        let raised = Graphic()
+        order.place(south, nil, tie: tie(35.0))
+        order.place(north, nil, tie: tie(35.1))
+        XCTAssertGreaterThan(south.zIndex, north.zIndex, "south added first must still draw above north")
+        order.place(raised, 1, tie: tie(36.0))
+        XCTAssertGreaterThan(raised.zIndex, south.zIndex, "zIndex=1 must draw above zIndex=nil")
+        // 北のマーカーが南へ動けば上に来る。
+        order.place(north, nil, tie: tie(34.9))
+        XCTAssertGreaterThan(north.zIndex, south.zIndex)
+        XCTAssertGreaterThan(raised.zIndex, north.zIndex)
+    }
+
+    /// 地図を回して順位を付け直すと、同じ zIndex の中は画面で下が上になる。zIndex はそのまま勝つ。
+    func testRetieAfterRotationPutsTheScreenLowerMarkerOnTop() {
+        let order = ArcGISGraphicsZIndex()
+        let tie = { (lat: Double, heading: Double) in
+            MarkerDrawOrder.key(
+                zIndex: nil,
+                position: self.pt(lat, 139),
+                frame: MarkerDrawOrder.Frame(headingDegrees: heading, originLongitude: 139)
+            )
+        }
+        let south = Graphic()
+        let north = Graphic()
+        let raised = Graphic()
+        order.place(south, nil, tie: tie(35.0, 0))
+        order.place(north, nil, tie: tie(35.1, 0))
+        order.place(raised, 1, tie: tie(35.05, 0))
+        XCTAssertGreaterThan(south.zIndex, north.zIndex)
+        // 南が上の画面（heading 180）では北が下に来るので上。
+        order.retie([(south, tie(35.0, 180)), (north, tie(35.1, 180)), (raised, tie(35.05, 180))])
+        XCTAssertGreaterThan(north.zIndex, south.zIndex)
+        XCTAssertGreaterThan(raised.zIndex, north.zIndex)
+        // 戻せば戻る。
+        order.retie([(south, tie(35.0, 0)), (north, tie(35.1, 0)), (raised, tie(35.05, 0))])
+        XCTAssertGreaterThan(south.zIndex, north.zIndex)
+        XCTAssertGreaterThan(raised.zIndex, south.zIndex)
+    }
+
     func testPolygonsStackByZIndexWhateverOrderTheyArrive() async throws {
         let overlay = GraphicsOverlay()
         let renderer = ArcGISPolygonOverlayRenderer(polygonLayer: overlay)

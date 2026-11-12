@@ -122,6 +122,11 @@ public struct ArcGISDesign : MapConductorForArcGIS::ArcGISMapDesignTypeProtocol,
   final public func toScreenOffset(position: any MapConductorCore::GeoPointProtocol) -> CoreFoundation::CGPoint?
   final public func fromScreenOffset(offset: CoreFoundation::CGPoint) async -> MapConductorCore::GeoPoint?
   final public func fromScreenOffsetSync(offset: CoreFoundation::CGPoint) -> MapConductorCore::GeoPoint?
+  final public var coordinateSystem: MapConductorCore::MapCoordinateSystem {
+    get
+  }
+  final public func toProjectedPoint(_ position: any MapConductorCore::GeoPointProtocol) -> CoreFoundation::CGPoint?
+  final public func fromProjectedPoint(_ point: CoreFoundation::CGPoint) -> MapConductorCore::GeoPoint?
   public typealias ActualMap = ArcGIS::Map
   public typealias ActualMapView = MapConductorForArcGIS::ArcGISMapContainer2D
   @objc deinit
