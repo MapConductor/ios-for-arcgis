@@ -553,8 +553,16 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         controller.setMapClickListener(listener: onMapClick)
         controller.setMapLongClickListener(listener: onMapLongClick)
         controller.setCameraMoveStartListener(listener: onCameraMoveStart)
-        controller.setCameraMoveListener(listener: onCameraMove)
-        controller.setCameraMoveEndListener(listener: onCameraMoveEnd)
+        // state のカメラも地図に追従させる（他プロバイダと同じく、移動中・停止時の両方）。
+        // 以前は callback だけに渡していて、`state.cameraPosition` が初期値のまま止まっていた。
+        controller.setCameraMoveListener(listener: { [weak state] position in
+            state?.updateCameraPosition(position)
+            onCameraMove?(position)
+        })
+        controller.setCameraMoveEndListener(listener: { [weak state] position in
+            state?.updateCameraPosition(position)
+            onCameraMoveEnd?(position)
+        })
         controller.setMapDesignTypeChangeListener(listener: { [weak state] value in state?.onMapDesignTypeChange(value: value) })
 
         let markerController = controller.markerController
