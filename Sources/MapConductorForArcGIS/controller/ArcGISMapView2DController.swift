@@ -277,7 +277,15 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     /// 2D `MapView` はカメラピッチを持てないため、tilt < 0（上向き）は中心の前進と
     /// ズーム補正で近似する（`ArcGIS2DTiltEmulation`）。tilt >= 0 は他プロバイダと同じく
     /// 指定位置がそのまま画面中心に来る。
-    private func toViewpoint(_ position: MapCameraPosition) -> Viewpoint {
+    private func toViewpoint(_ requested: MapCameraPosition) -> Viewpoint {
+        // パディングは中心をずらして再現する。tilt はビューを傾けるだけ（遠近なし）なので
+        // 視野角 0 として換算する（``ArcGIS2DTiltEmulation/verticalFieldOfView``）。
+        // MapView の contentInsets は傾ける前の拡大した平面に効くので、傾けた画面とは合わない。
+        let position = CameraPaddingEmulation.applied(
+            to: requested,
+            fov: ArcGIS2DTiltEmulation.verticalFieldOfView,
+            viewportSize: typedHolder.mapView.viewportSize ?? .zero
+        )
         let shifted = ArcGIS2DTiltEmulation.shiftedCamera(for: position)
         let point = shifted.center.toArcGISPoint(spatialReference: .wgs84)
         let scale = ArcGISMapView2DController.zoomToScale(shifted.zoom)

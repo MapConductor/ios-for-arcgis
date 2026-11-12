@@ -12,7 +12,16 @@ public extension MapCameraPosition {
     }
 
     func toArcGISCamera(viewportSize: CGSize? = nil) -> Camera {
-        let targetPoint = position.toArcGISPoint(spatialReference: .wgs84)
+        toArcGISCamera(viewportSize: viewportSize, fieldOfView: nil)
+    }
+
+    /// - Parameter fieldOfView: SceneView の縦の視野角。`paddings` があるとき、ターゲットが
+    ///   パディングの残りの中央に来るようカメラの中心をずらすのに使う（``CameraPaddingEmulation``）。
+    internal func toArcGISCamera(viewportSize: CGSize?, fieldOfView: Double?) -> Camera {
+        let center = viewportSize.map {
+            CameraPaddingEmulation.cameraCenter(for: self, fov: fieldOfView, viewportSize: $0)
+        } ?? GeoPoint.from(position: position)
+        let targetPoint = center.toArcGISPoint(spatialReference: .wgs84)
         let width = viewportSize.map { Int($0.width) }
         let height = viewportSize.map { Int($0.height) }
         let distance = arcGISCameraConverter.zoomLevelToDistance(

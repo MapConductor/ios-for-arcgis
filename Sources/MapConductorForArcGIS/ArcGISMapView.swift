@@ -381,7 +381,7 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         container.viewportSize = size
         guard didBind, container.proxy != nil else { return }
         container.proxy?.proxy.setViewpointCamera(
-            container.lastCameraPosition.toArcGISCamera(viewportSize: size)
+            container.lastCameraPosition.toArcGISCamera(viewportSize: size, fieldOfView: container.verticalFieldOfView)
         )
     }
 
@@ -553,8 +553,16 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         controller.setMapClickListener(listener: onMapClick)
         controller.setMapLongClickListener(listener: onMapLongClick)
         controller.setCameraMoveStartListener(listener: onCameraMoveStart)
-        controller.setCameraMoveListener(listener: onCameraMove)
-        controller.setCameraMoveEndListener(listener: onCameraMoveEnd)
+        // state のカメラも地図に追従させる（他プロバイダと同じく、移動中・停止時の両方）。
+        // 以前は callback だけに渡していて、`state.cameraPosition` が初期値のまま止まっていた。
+        controller.setCameraMoveListener(listener: { [weak state] position in
+            state?.updateCameraPosition(position)
+            onCameraMove?(position)
+        })
+        controller.setCameraMoveEndListener(listener: { [weak state] position in
+            state?.updateCameraPosition(position)
+            onCameraMoveEnd?(position)
+        })
         controller.setMapDesignTypeChangeListener(listener: { [weak state] value in state?.onMapDesignTypeChange(value: value) })
 
         let markerController = controller.markerController
@@ -710,9 +718,16 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
     }
 
     func notifyCameraMove(camera: Camera) {
-        let position = camera.toMapCameraPosition(
+        // `raw.position` は画面中心。外へはターゲット（パディングの残りの中央）と視野角を出す。
+        let raw = camera.toMapCameraPosition(
             logicalTiltHint: controller?.lastLogicalTilt,
             viewportSize: container.viewportSize
+        )
+        let position = CameraPaddingEmulation.restored(
+            raw,
+            paddings: container.lastPaddings,
+            fov: container.verticalFieldOfView,
+            viewportSize: container.viewportSize ?? .zero
         )
         container.lastCameraPosition = position
         // The in-process tile callback holds back requests for levels the
@@ -730,15 +745,9 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             if self.controller?.rasterLayerController.renderer.directLayersNeedRebuild() == true {
                 self.refreshDirectTileLayers()
             }
-            let vr = Self.computeVisibleRegion(for: position, viewportSize: viewportSize)
-            let posWithVR = MapCameraPosition(
-                position: position.position,
-                zoom: position.zoom,
-                bearing: position.bearing,
-                tilt: position.tilt,
-                paddings: position.paddings,
-                visibleRegion: vr
-            )
+            // 可視領域はカメラの幾何から出すので、画面中心のカメラ（raw）で計算する。
+            let vr = Self.computeVisibleRegion(for: raw, viewportSize: viewportSize)
+            let posWithVR = position.copy(visibleRegion: vr)
             // 範囲・ズーム制限に違反していれば矩形内へ引き戻す（ArcGIS はネイティブの範囲制限
             // API が無いため）。再適用すると viewpointChanged が再発火し、そこでは補正不要に
             // なり通常フローへ進む。android-for-arcgis と同一仕様。
