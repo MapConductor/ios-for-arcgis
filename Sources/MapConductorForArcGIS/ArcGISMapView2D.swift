@@ -382,12 +382,19 @@ private final class ArcGISMapView2DModel: ObservableObject {
             bearing: bearing,
             logicalTilt: logical.tilt
         )
-        let cameraPosition = MapCameraPosition(
+        // `centerCamera.position` は画面中心。外へはターゲット（パディングの残りの中央）と視野角を出す。
+        let centerCamera = MapCameraPosition(
             position: restored.position,
             zoom: restored.zoom,
             bearing: bearing,
             tilt: logical.tilt,
             paddings: MapPaddings.Zeros
+        )
+        let cameraPosition = CameraPaddingEmulation.restored(
+            centerCamera,
+            paddings: logical.paddings,
+            fov: ArcGIS2DTiltEmulation.verticalFieldOfView,
+            viewportSize: container.viewportSize ?? .zero
         )
         // The in-process tile callback answers levels the camera is not
         // looking at with transparent tiles; this is how it knows which level
@@ -398,22 +405,17 @@ private final class ArcGISMapView2DModel: ObservableObject {
         // and each was a full render of a z11 tile.
         controller?.rasterLayerController.renderer.cameraMoved(unifiedZoom: cameraPosition.zoom, displayScale: 1)
         controller?.notifyCameraMove(cameraPosition)
-        scheduleCameraMoveEnd(cameraPosition)
+        scheduleCameraMoveEnd(cameraPosition, centerCamera: centerCamera)
         // クラスタは visibleRegion.bounds を使うため、付与したカメラを渡す。
-        let cameraForCluster = MapCameraPosition(
-            position: cameraPosition.position,
-            zoom: cameraPosition.zoom,
-            bearing: cameraPosition.bearing,
-            tilt: cameraPosition.tilt,
-            paddings: cameraPosition.paddings,
-            visibleRegion: arcGISComputeVisibleRegion(for: cameraPosition, viewportSize: container.viewportSize)
+        let cameraForCluster = cameraPosition.copy(
+            visibleRegion: arcGISComputeVisibleRegion(for: centerCamera, viewportSize: container.viewportSize)
         )
         Task { [weak self] in await self?.strategyManager.onCameraChanged(cameraForCluster) }
     }
 
     /// パンやズームが落ち着いてから 1 度だけ補正する。移動中に毎フレーム引き戻すと
     /// ユーザーのジェスチャーと競合するため。
-    private func scheduleCameraMoveEnd(_ cameraPosition: MapCameraPosition) {
+    private func scheduleCameraMoveEnd(_ cameraPosition: MapCameraPosition, centerCamera: MapCameraPosition) {
         cameraMoveEndWorkItem?.cancel()
         let viewportSize = container.viewportSize
         let workItem = DispatchWorkItem { [weak self] in
@@ -424,13 +426,8 @@ private final class ArcGISMapView2DModel: ObservableObject {
             if self.controller?.rasterLayerController.renderer.directLayersNeedRebuild() == true {
                 self.refreshDirectTileLayers()
             }
-            let withVisibleRegion = MapCameraPosition(
-                position: cameraPosition.position,
-                zoom: cameraPosition.zoom,
-                bearing: cameraPosition.bearing,
-                tilt: cameraPosition.tilt,
-                paddings: cameraPosition.paddings,
-                visibleRegion: arcGISComputeVisibleRegion(for: cameraPosition, viewportSize: viewportSize)
+            let withVisibleRegion = cameraPosition.copy(
+                visibleRegion: arcGISComputeVisibleRegion(for: centerCamera, viewportSize: viewportSize)
             )
             // 範囲・ズーム制限に違反していれば矩形内へ引き戻す。引き戻すと viewpoint が
             // また変わり、次の停止で補正不要になって通知まで進む（3D 側と同じ）。

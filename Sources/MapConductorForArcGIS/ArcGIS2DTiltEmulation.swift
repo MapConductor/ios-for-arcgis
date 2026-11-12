@@ -31,6 +31,9 @@ enum ArcGIS2DTiltEmulation {
     /// （座標の畳み込み）の両方が参照するのでここに置く。
     static let planeScale: CGFloat = 2.0
 
+    /// tilt は遠近なしで描く（ビューを傾けるだけ）ので、縦の視野角は 0。
+    static let verticalFieldOfView: Double = 0.0
+
     /// 高度の算出にはプラットフォーム非依存の既定値（Google Maps 較正）を使う。
     ///
     /// `ArcGISZoomAltitudeConverter` の既定値（iOS 141_600_000 / Android 136_500_000）は

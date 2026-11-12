@@ -9,6 +9,21 @@ public final class ArcGISSceneContainer {
     var proxy: SceneViewProxyBox?
     var lastCameraPosition: MapCameraPosition
     var viewportSize: CGSize?
+    /// 直近の移動で要求されたパディング。SceneView にはカメラのパディングが無いので、カメラの
+    /// 中心をずらして再現し（``CameraPaddingEmulation``）、読み戻しで逆にずらすときに使う。
+    /// ``lastCameraPosition`` は読み戻しで上書きされるので別に持つ。
+    var lastPaddings: MapPaddingsProtocol?
+
+    /// SceneView のカメラの**縦**の視野角（度）。
+    ///
+    /// `SceneViewProxy.fieldOfView` は画面の**対角**の視野角なので、縦へ換算する。
+    /// まだ地図もビューポートも無ければ nil。
+    var verticalFieldOfView: Double? {
+        guard let proxy, let size = viewportSize, size.width > 0, size.height > 0 else { return nil }
+        let diagonal = (Double(size.width) * Double(size.width) + Double(size.height) * Double(size.height)).squareRoot()
+        let halfDiagonal = proxy.proxy.fieldOfView * .pi / 360.0
+        return 2.0 * atan(tan(halfDiagonal) * Double(size.height) / diagonal) * 180.0 / .pi
+    }
     // ArcGIS SDK uses weak_ptr internally, so these must be retained here to keep C++ objects alive.
     let baseSurface: ArcGIS.Surface
     let elevationSources: [ArcGIS.ElevationSource]
@@ -23,6 +38,7 @@ public final class ArcGISSceneContainer {
         self.scene = scene
         self.graphicsOverlays = graphicsOverlays
         self.lastCameraPosition = cameraPosition
+        self.lastPaddings = cameraPosition.paddings
         self.baseSurface = baseSurface
         self.elevationSources = elevationSources
     }
