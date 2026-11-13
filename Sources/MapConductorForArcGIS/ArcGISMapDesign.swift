@@ -31,6 +31,17 @@ public struct ArcGISDesign: ArcGISMapDesignTypeProtocol, Hashable {
         ArcGISDesign(id: id, elevationSources: sources, attributionRules: attributionRules)
     }
 
+    /**
+     No basemap at all: the scene shows only what the app puts on it.
+
+     For a map that supplies its own ground -- a raster layer covering the
+     whole view, tiles rendered on the device -- the basemap underneath is
+     fetched, decoded and drawn for nobody to see. The same value exists on
+     Google Maps as ``GoogleMapDesign/None``; MapLibre says it with a blank
+     style. android-sdk and react-sdk carry the same `"none"`.
+     */
+    public static let None = ArcGISDesign(id: "none")
+
     public static let Streets = ArcGISDesign(id: "arc_gis_streets")
     public static let Imagery = ArcGISDesign(id: "arc_gis_imagery")
     public static let ImageryStandard = ArcGISDesign(id: "arc_gis_imagery_standard")
@@ -95,6 +106,12 @@ public struct ArcGISDesign: ArcGISMapDesignTypeProtocol, Hashable {
     public static func Create(id: String, sources: [String] = []) -> ArcGISDesign {
         let known = all.first { $0.id == id }
         return known?.withElevationSources(sources) ?? ArcGISDesign(id: id, elevationSources: sources)
+    }
+
+    /// The basemap a design asks for, or nil for ``None``.
+    public static func basemap(for designType: ArcGISMapDesignType) -> Basemap? {
+        guard designType.getValue() != None.id else { return nil }
+        return Basemap(style: toBasemapStyle(designType))
     }
 
     public static func toBasemapStyle(_ designType: ArcGISMapDesignType) -> Basemap.Style {
@@ -164,7 +181,7 @@ public struct ArcGISDesign: ArcGISMapDesignTypeProtocol, Hashable {
     }
 
     private static let all: [ArcGISDesign] = [
-        Streets, Imagery, ImageryStandard, ImageryLabels, LightGray, LightGrayBase, LightGrayLabels,
+        None, Streets, Imagery, ImageryStandard, ImageryLabels, LightGray, LightGrayBase, LightGrayLabels,
         DarkGray, DarkGrayBase, DarkGrayLabels, Navigation, NavigationNight, StreetsNight,
         StreetsRelief, Topographic, Oceans, OceansBase, OceansLabels, Terrain, TerrainBase,
         TerrainDetail, Community, ChartedTerritory, ColoredPencil, Nova, ModernAntique,

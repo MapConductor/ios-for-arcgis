@@ -1,7 +1,7 @@
 import ArcGIS
 import CoreGraphics
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 final class ArcGISMapView2DController: MapViewControllerProtocol {
     let holder: AnyMapViewHolder
@@ -23,6 +23,9 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     /// クラスタ等のプラグインが接続中に使う描画コントローラ。3D 側と同じく、
     /// 接続状況が変わるため毎回 provider から取り直す。
     private let strategyMarkerControllerProvider: () -> ArcGISStrategyMarkerController?
+    /// `clearOverlays()` で strategy（クラスタリングなど）のマーカーも消すために引く。
+    /// 持ち主は state なので弱参照で持つ。
+    private weak var serviceRegistry: MapServiceRegistry?
 
     private var cameraMoveStartListener: OnCameraMoveHandler?
     private var cameraMoveListener: OnCameraMoveHandler?
@@ -74,7 +77,8 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         circleController: ArcGISCircleOverlayController,
         groundImageController: ArcGISGroundImageController,
         rasterLayerController: ArcGISRasterLayerController,
-        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil }
+        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil },
+        serviceRegistry: MapServiceRegistry? = nil
     ) {
         self.typedHolder = holder
         self.holder = AnyMapViewHolder(holder)
@@ -85,6 +89,7 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         self.groundImageController = groundImageController
         self.rasterLayerController = rasterLayerController
         self.strategyMarkerControllerProvider = strategyMarkerControllerProvider
+        self.serviceRegistry = serviceRegistry
     }
 
     func clearOverlays() async {
@@ -94,6 +99,8 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
         await polygonController.clear()
         await circleController.clear()
         await rasterLayerController.clear()
+        // strategy（クラスタリングなど）が描いたマーカーも消す。
+        await serviceRegistry?.clearMarkerRendering()
     }
 
     func setCameraMoveStartListener(listener: OnCameraMoveHandler?) { cameraMoveStartListener = listener }
@@ -146,7 +153,14 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     }
 
     func setMapDesignType(_ value: ArcGISMapDesignType) {
-        typedHolder.map.basemap = Basemap(style: ArcGISDesign.toBasemapStyle(value))
+        let map = typedHolder.map
+        map.basemap = ArcGISDesign.basemap(for: value)
+        // A map that failed to load -- its basemap was out of reach -- gets
+        // another go with the new basemap, or with none, which needs no
+        // network at all.
+        if case .failed = map.loadStatus {
+            Task { try? await map.retryLoad() }
+        }
         mapDesignTypeChangeListener?(value)
     }
 
@@ -263,13 +277,23 @@ final class ArcGISMapView2DController: MapViewControllerProtocol {
     /// 2D `MapView` はカメラピッチを持てないため、tilt < 0（上向き）は中心の前進と
     /// ズーム補正で近似する（`ArcGIS2DTiltEmulation`）。tilt >= 0 は他プロバイダと同じく
     /// 指定位置がそのまま画面中心に来る。
-    private func toViewpoint(_ position: MapCameraPosition) -> Viewpoint {
+    private func toViewpoint(_ requested: MapCameraPosition) -> Viewpoint {
+        // パディングは中心をずらして再現する。tilt はビューを傾けるだけ（遠近なし）なので
+        // 視野角 0 として換算する（``ArcGIS2DTiltEmulation/verticalFieldOfView``）。
+        // MapView の contentInsets は傾ける前の拡大した平面に効くので、傾けた画面とは合わない。
+        let position = CameraPaddingEmulation.applied(
+            to: requested,
+            fov: ArcGIS2DTiltEmulation.verticalFieldOfView,
+            viewportSize: typedHolder.mapView.viewportSize ?? .zero
+        )
         let shifted = ArcGIS2DTiltEmulation.shiftedCamera(for: position)
         let point = shifted.center.toArcGISPoint(spatialReference: .wgs84)
         let scale = ArcGISMapView2DController.zoomToScale(shifted.zoom)
         // 2D MapView は回転をネイティブに扱えるので bearing はそのまま渡す
         // （android-for-arcgis の `toViewpoint` と同じ 1:1 対応）。
-        return Viewpoint(center: point, scale: scale, rotation: position.bearing)
+        // ArcGIS Runtime の Viewpoint.rotation は反時計回り、つまりカメラの heading と
+        // 同じ向き（JS の MapView.rotation とは逆）。ArcGISMapView2D の initialViewpoint も同じ。
+        return Viewpoint(center: point, scale: scale, rotation: CameraBearing.toNativeHeading(position.bearing))
     }
 
     @MainActor

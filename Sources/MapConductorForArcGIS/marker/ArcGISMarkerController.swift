@@ -2,7 +2,7 @@ import ArcGIS
 import Combine
 import CoreGraphics
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 import UIKit
 
 @MainActor
@@ -22,10 +22,18 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     private var tileRenderer: MarkerTileRenderer<Graphic>?
     private var tileRouteId: String?
     private var tiledMarkerIds: Set<String> = []
+    /// タイル URL の版。マーカーが変わるたびに上げ、地図に描画済みのタイルを取り直させる。
+    private var tileVersion: Int64 = 0
+    private var tileRefreshScheduled = false
     private var tileRasterLayerId: String?
     private let defaultMarkerIconForTiling: BitmapIcon = DefaultMarkerIcon().toBitmapIcon()
 
+    /// The marker tile layer's declared side.
     private static let tileSize = 256
+
+    /// Whether the map lays tiles out in points (2D `MapView`) rather than
+    /// across 256 device pixels (3D `SceneView`). See ``renderTileSize``.
+    private let tilesInPoints: Bool
 
     /// 2D の tilt 表現が変わったときに、マーカーの縦補正を掛け直す。
     func refreshVerticalStretch() {
@@ -35,9 +43,11 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     init(
         markerLayer: GraphicsOverlay,
         container: any ArcGISMapContext,
+        tilesInPoints: Bool = false,
         onUpdateInfoBubble: @escaping (String) -> Void
     ) {
         self.container = container
+        self.tilesInPoints = tilesInPoints
         self.onUpdateInfoBubble = onUpdateInfoBubble
         let markerManager = MarkerManager<Graphic>.defaultManager()
         super.init(
@@ -46,7 +56,17 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         )
     }
 
+    /// 同一一覧の再送を見抜く門番。詳細は型のコメントに。
+    private var syncIdentity = MarkerListIdentity()
+
     func syncMarkers(_ markers: [MapConductorCore.Marker]) async {
+        // 同じ一覧の再送は入口で帰す。SwiftUI はカメラが動くたびに body を
+        // 再評価し、そのたびに全マーカーがここへ来る。なぜそれが実害か
+        // （144k 件で操作の 89% が凍った）は core の MarkerListIdentity に。
+        guard syncIdentity.shouldProcess(markers) else {
+            _ = markers // 何も要らない。既に全部届いている。
+            return
+        }
         let newIds = Set(markers.map(\.id))
         let oldIds = Set(markerStatesById.keys)
         var next: [String: MarkerState] = [:]
@@ -79,13 +99,11 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         markers.forEach { subscribeToMarker($0.state) }
     }
 
-    /// android-for-arcgis の `ArcGISMarkerController.find()` と同じく、最近傍マーカーを
-    /// 「アイコン矩形 + tapTolerance」で判定する。半径固定だと大きいアイコンは端が反応せず、
-    /// 小さいアイコンは離れていても反応してしまうため、アイコンの実寸とアンカーを使う。
+    /// android-sdk の `AbstractMarkerController.find()` と同じく、タップ点の周りのマーカーを候補にし、
+    /// 指の下にアイコン（ラベル込み）が描かれているものを優先する（``MarkerHitTest/pick``）。
     ///
     /// 投影できない場合（proxy 未接続など）は判定できないので、従来どおり最近傍を返す。
     override func find(position: GeoPointProtocol) -> MarkerEntity<Graphic>? {
-        guard let nearest = markerManager.findNearest(position: position) else { return nil }
         // 基底の `find` は nonisolated だが、呼び出し元はタップ処理（`handleTap`）だけで
         // 常にメインアクター上。投影 API（`ArcGISMapContext`）はメインアクター隔離のため、
         // ここで隔離済みであることを明示する。
@@ -93,17 +111,49 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
             guard let container,
                   let touchScreen = container.screenPoint(
                       fromLocation: position.toArcGISPoint(spatialReference: .wgs84)
-                  ),
-                  let markerScreen = container.screenPoint(
-                      fromLocation: nearest.state.position.toArcGISPoint(spatialReference: .wgs84)
                   ) else {
-                return nearest
+                return markerManager.findNearest(position: position)
             }
-            return MarkerHitTest.hitsIcon(
+            let project: (GeoPointProtocol) -> CGPoint? = {
+                container.screenPoint(fromLocation: $0.toArcGISPoint(spatialReference: .wgs84))
+            }
+            guard let bounds = MarkerHitTest.searchBounds(
+                position: position,
                 touchScreen: touchScreen,
-                markerScreen: markerScreen,
-                state: nearest.state
-            ) ? nearest : nil
+                project: project
+            ) else { return nil }
+            return MarkerHitTest.pick(
+                touchScreen: touchScreen,
+                candidates: markerManager.findMarkersInBounds(bounds),
+                state: { $0.state },
+                project: project
+            )
+        }
+    }
+
+    /// タイル担当のマーカーが変わったら、タイルを描き直させる。
+    ///
+    /// タイル担当のマーカーはネイティブのマーカーを持たないので、基底の `update` は
+    /// 管理表を書き換えるだけで地図には何も届かない。アイコンや位置をその場で
+    /// 書き換えても、描画済みのタイルは古い絵のまま残っていた。
+    override func update(state: MarkerState) async {
+        await super.update(state: state)
+        guard tiledMarkerIds.contains(state.id) else { return }
+        scheduleTileRefresh()
+    }
+
+    /// 描き直しは 1 回にまとめる。ラベルの付け替えのように数百本が続けて変わると、
+    /// 1 本ごとに層を作り直して、そのたびに地図が全タイルを取り直す。
+    private func scheduleTileRefresh() {
+        guard !tileRefreshScheduled else { return }
+        tileRefreshScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.tileRefreshScheduled = false
+            guard let tileRenderer = self.tileRenderer else { return }
+            tileRenderer.invalidate()
+            self.tileVersion += 1
+            self.updateTileLayer(hasTiledMarkers: !self.tiledMarkerIds.isEmpty)
         }
     }
 
@@ -123,14 +173,32 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
             defaultMarkerIcon: defaultMarkerIconForTiling,
             tilingEnabled: tilingOptions.enabled,
             tiledMarkerIds: &localTiledMarkerIds,
+            addedTracker: addedTracker,
             shouldTile: { [shouldTileAll] _ in shouldTileAll }
         )
         tiledMarkerIds = localTiledMarkerIds
 
         if result.tiledDataChanged, let tileRenderer {
             tileRenderer.invalidate()
+            tileVersion += 1
             updateTileLayer(hasTiledMarkers: result.hasTiledMarkers)
         }
+
+        // The newly tiled markers are on the map once their tile layer is.
+        await addedTracker.admitAndNotify(result.tiledAdded)
+    }
+
+    /// Pixels a marker tile is drawn at.
+    ///
+    /// The 3D `SceneView` shows a tile across 256 device pixels, so a 256 px
+    /// tile is shown 1:1. The 2D `MapView` lays the declared 256 out in
+    /// points -- 512 device pixels at scale 2 -- and a 256 px tile was
+    /// stretched to twice its size: pins came out twice as large with soft
+    /// edges (iPad Pro, 75 px against Google's 38). Drawn at the screen's
+    /// scale, the 2D tile fills its points pixel for pixel, like the
+    /// `retinaAwareTileSize` of the Google and MapLibre controllers.
+    private var renderTileSize: Int {
+        tilesInPoints ? Self.tileSize * max(1, Int(UIScreen.main.scale)) : Self.tileSize
     }
 
     private func setupTileRenderer() {
@@ -142,10 +210,14 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
         }
         let renderer = MarkerTileRenderer<Graphic>(
             markerManager: markerManager,
-            tileSize: Self.tileSize,
+            tileSize: renderTileSize,
             cacheSizeBytes: tilingOptions.cacheSize,
             debugTileOverlay: tilingOptions.debugTileOverlay,
-            iconScaleCallback: scaledCallback
+            iconScaleCallback: scaledCallback,
+            // MapLibre と同じく tilingOptions から。渡し忘れると 14px の間引きが
+            // 黙って無効になり、密なデータで描画も突き合わせも重くなる（実際に
+            // ここが 0 のままだった）。
+            declutterPx: tilingOptions.declutterPx
         )
         TileServerRegistry.get().register(routeId: routeId, provider: renderer)
         tileRenderer = renderer
@@ -161,11 +233,16 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
             return
         }
         let server = TileServerRegistry.get()
-        let urlTemplate = server.urlTemplate(routeId: routeId, tileSize: tileRenderer.tileSize)
+        let urlTemplate = server.urlTemplate(
+            routeId: routeId,
+            tileSize: tileRenderer.tileSize,
+            // 版は URL に入れる。同じ URL のままだと地図は描画済みのタイルを取り直さない。
+            cacheKey: "v\(tileVersion)"
+        )
         let layerId = tileRasterLayerId ?? "marker-tile-\(routeId)"
         tileRasterLayerId = layerId
         let state = RasterLayerState(
-            source: .urlTemplate(template: urlTemplate, tileSize: tileRenderer.tileSize),
+            source: .urlTemplate(template: urlTemplate, tileSize: Self.tileSize),
             id: layerId
         )
         markerTileRasterLayerCallback?(state)
@@ -238,31 +315,16 @@ final class ArcGISMarkerController: AbstractMarkerController<Graphic, ArcGISMark
     }
 
     /// ドラッグ開始時のヒットテスト。タップ（``find(position:)``）と同じ
-    /// 「アイコン矩形 + tapTolerance」で判定する。以前はアイコンの外接円を使った半径判定
+    /// ``MarkerHitTest/pick`` の規則で選ぶ。以前はアイコンの外接円を使った半径判定
     /// （`max(22, 最大辺 / 2)`）で、同じアイコンでもタップとドラッグで当たる範囲が違っていた。
     private func draggableMarker(at screenPoint: CGPoint) -> MarkerEntity<Graphic>? {
         guard let container else { return nil }
-
-        var bestEntity: MarkerEntity<Graphic>?
-        var bestDistance = CGFloat.infinity
-
-        for entity in markerManager.allEntities() where entity.state.draggable {
-            let location = entity.state.position.toArcGISPoint(spatialReference: .wgs84)
-            guard let projected = container.screenPoint(fromLocation: location) else { continue }
-            guard MarkerHitTest.hitsIcon(
-                touchScreen: screenPoint,
-                markerScreen: projected,
-                state: entity.state
-            ) else { continue }
-
-            let distance = hypot(screenPoint.x - projected.x, screenPoint.y - projected.y)
-            if distance < bestDistance {
-                bestDistance = distance
-                bestEntity = entity
-            }
-        }
-
-        return bestEntity
+        return MarkerHitTest.pick(
+            touchScreen: screenPoint,
+            candidates: markerManager.allEntities().filter { $0.state.draggable },
+            state: { $0.state },
+            project: { container.screenPoint(fromLocation: $0.toArcGISPoint(spatialReference: .wgs84)) }
+        )
     }
 
     private func subscribeToMarker(_ state: MarkerState) {

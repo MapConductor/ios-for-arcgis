@@ -9,6 +9,21 @@ public final class ArcGISSceneContainer {
     var proxy: SceneViewProxyBox?
     var lastCameraPosition: MapCameraPosition
     var viewportSize: CGSize?
+    /// 直近の移動で要求されたパディング。SceneView にはカメラのパディングが無いので、カメラの
+    /// 中心をずらして再現し（``CameraPaddingEmulation``）、読み戻しで逆にずらすときに使う。
+    /// ``lastCameraPosition`` は読み戻しで上書きされるので別に持つ。
+    var lastPaddings: MapPaddingsProtocol?
+
+    /// SceneView のカメラの**縦**の視野角（度）。
+    ///
+    /// `SceneViewProxy.fieldOfView` は画面の**対角**の視野角なので、縦へ換算する。
+    /// まだ地図もビューポートも無ければ nil。
+    var verticalFieldOfView: Double? {
+        guard let proxy, let size = viewportSize, size.width > 0, size.height > 0 else { return nil }
+        let diagonal = (Double(size.width) * Double(size.width) + Double(size.height) * Double(size.height)).squareRoot()
+        let halfDiagonal = proxy.proxy.fieldOfView * .pi / 360.0
+        return 2.0 * atan(tan(halfDiagonal) * Double(size.height) / diagonal) * 180.0 / .pi
+    }
     // ArcGIS SDK uses weak_ptr internally, so these must be retained here to keep C++ objects alive.
     let baseSurface: ArcGIS.Surface
     let elevationSources: [ArcGIS.ElevationSource]
@@ -23,6 +38,7 @@ public final class ArcGISSceneContainer {
         self.scene = scene
         self.graphicsOverlays = graphicsOverlays
         self.lastCameraPosition = cameraPosition
+        self.lastPaddings = cameraPosition.paddings
         self.baseSurface = baseSurface
         self.elevationSources = elevationSources
     }
@@ -142,6 +158,56 @@ public final class ArcGISMapView2DHolder: MapViewHolderProtocol {
 
     public func fromScreenOffsetSync(offset: CGPoint) -> GeoPoint? {
         nil
+    }
+
+    /// 2D の地図は空間参照を持つので、投影座標はその空間参照で返す（いまの 2D は
+    /// Web Mercator 固定だが、地図の空間参照が変われば追従する）。空間参照がまだ
+    /// 無いときは既定の EPSG:3857。3D（``ArcGISMapViewHolder``）は地球儀なので既定のまま。
+    public var coordinateSystem: MapCoordinateSystem {
+        map.spatialReference?.mapCoordinateSystem ?? .webMercator
+    }
+
+    public func toProjectedPoint(_ position: GeoPointProtocol) -> CGPoint? {
+        guard let reference = map.spatialReference else { return WebMercator().project(position) }
+        let wgs84 = Point(x: position.longitude, y: position.latitude, spatialReference: .wgs84)
+        guard let projected = GeometryEngine.project(wgs84, into: reference),
+              projected.x.isFinite, projected.y.isFinite else { return nil }
+        return CGPoint(x: projected.x, y: projected.y)
+    }
+
+    /// ``Point/projectedToWGS84()`` は投影に失敗すると元の値を返すので使わない。
+    public func fromProjectedPoint(_ point: CGPoint) -> GeoPoint? {
+        guard let reference = map.spatialReference else { return WebMercator().unproject(point) }
+        let source = Point(x: point.x, y: point.y, spatialReference: reference)
+        guard let wgs84 = GeometryEngine.project(source, into: .wgs84),
+              wgs84.x.isFinite, wgs84.y.isFinite else { return nil }
+        return GeoPoint(latitude: wgs84.y, longitude: wgs84.x)
+    }
+}
+
+extension SpatialReference {
+    /// ArcGIS の空間参照 → ``MapCoordinateSystem``。
+    ///
+    /// - WKID が 32767 以下なら EPSG の番号と同じなので `EPSG:<wkid>`。
+    /// - Esri 独自の番号は `ESRI:<wkid>`。ただし Web Mercator の旧番号
+    ///   （102100 / 102113）は EPSG:3857 にそろえる。
+    /// - WKID を持たない（WKT だけで定義された）空間参照は nil。
+    var mapCoordinateSystem: MapCoordinateSystem {
+        let code: String? = switch wkid?.rawValue {
+        case nil, 0: nil
+        case 102_100, 102_113: "EPSG:3857"
+        case let value? where value <= 32767: "EPSG:\(value)"
+        case let value?: "ESRI:\(value)"
+        }
+        let unit: ProjectedUnit =
+            if isGeographic {
+                .degrees
+            } else if self.unit == LinearUnit.meters {
+                .meters
+            } else {
+                .other
+            }
+        return MapCoordinateSystem(code: code, unit: unit)
     }
 }
 

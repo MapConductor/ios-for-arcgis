@@ -1,6 +1,6 @@
 import CoreGraphics
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 /// カメラ位置とビューポートサイズから可視領域を解析的に求める。
 ///
@@ -15,8 +15,9 @@ func arcGISComputeVisibleRegion(for position: MapCameraPosition, viewportSize: C
 
     let center = GeoPoint.from(position: position.position)
     let latRad = center.latitude * .pi / 180
-    // bearing θ: screen-up direction corresponds to geographic bearing θ
-    let θ = position.bearing * .pi / 180
+    // θ: 画面の上が指す方位。bearing は「地図を時計回りに回す量」なので、
+    // 画面の上が指す方位はその符号反転（= カメラの heading）になる。
+    let θ = CameraBearing.toNativeHeading(position.bearing) * .pi / 180
 
     // Web-Mercator ground resolution: metres per pixel at this zoom and latitude
     let metersPerPixel = (2 * .pi * 6_371_000.0 * cos(latRad)) / (256.0 * pow(2.0, position.zoom))

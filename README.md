@@ -10,6 +10,30 @@ Even using the wrapper API, you can still access the native ArcGIS view if you w
 
 https://mapconductor.com/setup/ios/arcgis/
 
+### Swift Package Manager
+
+```swift
+.package(url: "https://github.com/MapConductor/ios-for-arcgis", from: "1.3.1")
+```
+
+Esri's own `arcgis-maps-sdk-swift` comes along as a transitive dependency.
+
+### CocoaPods
+
+Esri publishes the ArcGIS Maps SDK for Swift only through Swift Package Manager, so there is no
+`ArcGIS` pod to depend on. `ArcGIS.podspec` in this repository stands in for one:
+it carries no binary, just the download URL and checksum copied from Esri's own `Package.swift`,
+so CocoaPods fetches the SDK straight from Esri. Point your `Podfile` at it explicitly - CocoaPods
+has no spec repo to find it in:
+
+```ruby
+pod 'ArcGIS', :podspec => 'https://raw.githubusercontent.com/MapConductor/ios-for-arcgis/1.3.1/ArcGIS.podspec'
+pod 'MapConductorForArcGIS'
+```
+
+ArcGIS Maps SDK for Swift 300.x requires **iOS 18**, so the app's deployment target must be at
+least `platform :ios, '18.0'`.
+
 ### API key
 
 This module ships an initialiser. Call it once, before the first map:

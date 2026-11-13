@@ -1,7 +1,7 @@
 import ArcGIS
 import Combine
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 import SwiftUI
 
 private typealias ArcGISStrategyController = StrategyMarkerController<
@@ -14,6 +14,8 @@ public struct ArcGISMapView: View {
     @ObservedObject private var state: ArcGISMapViewState
     private let cameraRestriction: CameraRestriction?
     private let handlers: MapViewHandlers<ArcGISMapViewState>
+    private let style: MapViewStyle?
+    private let onStyleDiagnostics: (([String]) -> Void)?
     private let content: () -> MapViewContent
 
     public init(
@@ -26,10 +28,18 @@ public struct ArcGISMapView: View {
         onCameraMove: OnCameraMoveHandler? = nil,
         onCameraMoveEnd: OnCameraMoveHandler? = nil,
         sdkInitialize: (() -> Void)? = nil,
+        /// How the map looks, when the app states it rather than naming a
+        /// design. `MapConductorVectorStyle` builds one; this backend cannot
+        /// draw a vector style, so what it gets is raster tiles rendered
+        /// from the same document.
+        style: MapViewStyle? = nil,
+        onStyleDiagnostics: (([String]) -> Void)? = nil,
         @MapViewContentBuilder content: @escaping () -> MapViewContent = { MapViewContent() }
     ) {
         self.state = state
         self.cameraRestriction = cameraRestriction
+        self.style = style
+        self.onStyleDiagnostics = onStyleDiagnostics
         self.handlers = MapViewHandlers(
             onMapLoaded: onMapLoaded,
             onMapClick: onMapClick,
@@ -54,6 +64,8 @@ public struct ArcGISMapView: View {
             state: state,
             cameraRestriction: cameraRestriction,
             handlers: handlers,
+            style: style,
+            onStyleDiagnostics: onStyleDiagnostics,
             content: mapContent
         )
     }
@@ -64,6 +76,8 @@ private struct ArcGISMapViewBody: View {
 
     let cameraRestriction: CameraRestriction?
     let handlers: MapViewHandlers<ArcGISMapViewState>
+    let style: MapViewStyle?
+    let onStyleDiagnostics: (([String]) -> Void)?
     let content: MapViewContent
 
     @StateObject private var model: ArcGISMapViewModel
@@ -72,11 +86,15 @@ private struct ArcGISMapViewBody: View {
         state: ArcGISMapViewState,
         cameraRestriction: CameraRestriction? = nil,
         handlers: MapViewHandlers<ArcGISMapViewState>,
+        style: MapViewStyle? = nil,
+        onStyleDiagnostics: (([String]) -> Void)? = nil,
         content: MapViewContent
     ) {
         self.state = state
         self.cameraRestriction = cameraRestriction
         self.handlers = handlers
+        self.style = style
+        self.onStyleDiagnostics = onStyleDiagnostics
         self.content = content
         ArcGISSdkInitialization.runOnce(handlers.sdkInitialize)
         _model = StateObject(wrappedValue: ArcGISMapViewModel(state: state))
@@ -88,6 +106,14 @@ private struct ArcGISMapViewBody: View {
             camera: state.cameraPosition,
             content: content
         ) {
+            // An empty view, mounted only so there is an `updateUIView` to
+            // keep the style in step. See `MapViewStyleApplier`.
+            // The shared state may still hold the departing view's registry.
+            // Install only after this view has registered its own controllers.
+            if model.didBind {
+                MapViewStyleApplier(host: model.styleHost, style: style, onDiagnostics: onStyleDiagnostics)
+                    .frame(width: 0, height: 0)
+            }
             SceneViewReader { proxy in
                 SceneView(scene: model.container.scene, graphicsOverlays: model.container.graphicsOverlays)
                     .onSingleTapGesture { screenPoint, mapPoint in
@@ -114,6 +140,17 @@ private struct ArcGISMapViewBody: View {
                     }
                     .onInteractingChanged { isInteracting in
                         if !isInteracting {
+                            // The direct layers used to be rebuilt after every
+                            // interaction, from when their callback could
+                            // return nil and leave holes. It never does now,
+                            // and every rebuild was a flicker: the new layer
+                            // pyramid-loads from scratch and shows its
+                            // transparent ancestors first. Rebuild only when
+                            // the camera has landed on a level that was
+                            // answered transparent.
+                            if model.controller?.rasterLayerController.renderer.directLayersNeedRebuild() == true {
+                                model.refreshDirectTileLayers()
+                            }
                             model.handleDragInteractionEnded()
                         }
                     }
@@ -156,10 +193,10 @@ private struct ArcGISMapViewBody: View {
                         NSLog("[MapConductor][ArcGIS] SceneView onDisappear")
                         model.unbind(state: state)
                     }
-                    .task(id: content.identityFingerprint ^ model.strategyFingerprint) {
+                    .task(id: content.overlayIdentityFingerprint ^ model.strategyFingerprint) {
                         NSLog(
                             "[MapConductor][ArcGIS] content task fingerprint=%d markers=%d polylines=%d polygons=%d circles=%d groundImages=%d rasterLayers=%d infoBubbles=%d",
-                            content.identityFingerprint,
+                            content.overlayIdentityFingerprint,
                             content.markers.count,
                             content.polylines.count,
                             content.polygons.count,
@@ -176,7 +213,11 @@ private struct ArcGISMapViewBody: View {
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { model.updateViewportSize($0) }
             }
 
-            InfoBubbleContainerRepresentable(container: model.infoBubbleContainer)
+            InfoBubbleContainerRepresentable(
+                container: model.infoBubbleContainer,
+                bubbles: content.infoBubbles,
+                sync: { [weak model] bubbles in model?.syncInfoBubbles(bubbles) }
+            )
         } topContent: {
             if !state.uiSettings.scrollGesture {
                 Color.clear
@@ -189,31 +230,22 @@ private struct ArcGISMapViewBody: View {
     }
 }
 
-private extension MapViewContent {
-    /// 差分検出用のフィンガープリント。strategy 由来のマーカーは `MapViewContent` から
-    /// 外れたため、``ArcGISMapViewModel/strategyFingerprint`` を足し合わせて使う。
-    var identityFingerprint: Int {
-        var hasher = Hasher()
-        markers.forEach {
-            hasher.combine($0.id)
-            hasher.combine($0.state.position.latitude)
-            hasher.combine($0.state.position.longitude)
-        }
-        polylines.forEach { hasher.combine($0.id) }
-        polygons.forEach { hasher.combine($0.id) }
-        circles.forEach { hasher.combine($0.id) }
-        groundImages.forEach { hasher.combine($0.id) }
-        rasterLayers.forEach { hasher.combine($0.id) }
-        infoBubbles.forEach { hasher.combine($0.id) }
-        return hasher.finalize()
-    }
-}
-
+/// 吹き出しを載せるコンテナ。``updateUIView`` で**毎回**吹き出しを同期する。
+///
+/// 地図側の `updateContent` は `.task(id: overlayIdentityFingerprint)` でしか走らず、指紋は
+/// 吹き出しの id しか見ていない。中身や色だけが変わっても task は再実行されないので、
+/// 以前は古い吹き出しが残った。ここは body が評価されるたびに呼ばれるので、中身の
+/// 差し替えはここで拾う（`InfoBubbleOverlayCoordinator` は id ごとにホストを使い回し、
+/// `rootView` を差し替えるだけなので、毎回呼んでも作り直しは起きない）。
 private struct InfoBubbleContainerRepresentable: UIViewRepresentable {
     let container: PassthroughContainerView
+    let bubbles: [InfoBubble]
+    let sync: @MainActor ([InfoBubble]) -> Void
 
     func makeUIView(context: Context) -> PassthroughContainerView { container }
-    func updateUIView(_ uiView: PassthroughContainerView, context: Context) {}
+    func updateUIView(_ uiView: PassthroughContainerView, context: Context) {
+        sync(bubbles)
+    }
 }
 
 @MainActor
@@ -239,6 +271,13 @@ private enum ArcGISSdkInitialization {
 @MainActor
 private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport {
     let container: ArcGISSceneContainer
+
+    /// What the map offers the ``MapViewStyle`` installed on it.
+    ///
+    /// Held here rather than inherited: this provider draws with SwiftUI and
+    /// its model is not a `MapViewCoordinatorBase`. The style comes off when
+    /// the model does.
+    let styleHost: MapViewStyleHost
     private let markerLayer = GraphicsOverlay()
     private let polylineLayer = GraphicsOverlay()
     private let polygonLayer = GraphicsOverlay()
@@ -248,7 +287,8 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
     private(set) var controller: ArcGISMapViewController?
     private var hullPolygonController: ArcGISPolygonOverlayController?
     private var overlayScope: MapOverlayScope?
-    private var didBind = false
+    @Published private(set) var didBind = false
+    private let serviceRegistrations = MapServiceRegistrations()
     private var dragState: MarkerDragState = .idle
     /// 「1秒長押し → ドラッグ」ジェスチャでマーカーを掴んでいる間 true。
     private var holdDragActive = false
@@ -257,6 +297,8 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
     private let cameraMoveEndDebounceSeconds = 0.18
 
     private var currentMarkerTileRasterLayer: RasterLayerState?
+    /// 直近の content のラスターレイヤ。マーカーのタイル層だけが変わったときに合流し直すため。
+    private var contentRasterLayers: [RasterLayerState] = []
 
     private var strategyMarkerController: ArcGISStrategyController?
     private var strategyMarkerRenderer: ArcGISMarkerRenderer?
@@ -271,8 +313,13 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
 
     let infoBubbleContainer = PassthroughContainerView()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
+    /// The design the scene was built with; a design set on the state before
+    /// the controller existed is applied once it does.
+    private var createdDesignId = ""
+    private var retriedLoad = false
 
     init(state: ArcGISMapViewState) {
+        styleHost = MapViewStyleHost(serviceRegistry: state.serviceRegistry)
         NSLog(
             "[MapConductor][ArcGIS] ArcGISMapViewModel init design=%@ camera=(lat=%f lon=%f zoom=%f bearing=%f tilt=%f)",
             String(describing: state.mapDesignType),
@@ -282,7 +329,12 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             state.cameraPosition.bearing,
             state.cameraPosition.tilt
         )
-        let scene = ArcGIS.Scene(basemapStyle: ArcGISDesign.toBasemapStyle(state.mapDesignType))
+        // The basemap is set on an empty scene rather than built into it, so
+        // a scene whose basemap is out of reach is still a scene (a global
+        // one is always WGS84) that can draw its own layers.
+        let scene = ArcGIS.Scene()
+        scene.basemap = ArcGISDesign.basemap(for: state.mapDesignType)
+        createdDesignId = state.mapDesignType.getValue()
         let initialCamera = state.cameraPosition.toArcGISCamera()
         let initialCenter = state.cameraPosition.position.toArcGISPoint(spatialReference: .wgs84)
         let initialScale = max(1, state.cameraPosition.altitudeForArcGIS())
@@ -311,7 +363,9 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
 
         self.container = ArcGISSceneContainer(
             scene: scene,
-            graphicsOverlays: [circleLayer, polygonLayer, hullPolygonLayer, polylineLayer, markerLayer],
+            // 下から ポリゴン < サークル < ポリライン < マーカー（OverlayBand の順）。
+            // 以前はサークルがポリゴンより下だった。
+            graphicsOverlays: [polygonLayer, hullPolygonLayer, circleLayer, polylineLayer, markerLayer],
             cameraPosition: state.cameraPosition,
             baseSurface: surface,
             elevationSources: elevationSources
@@ -327,7 +381,7 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         container.viewportSize = size
         guard didBind, container.proxy != nil else { return }
         container.proxy?.proxy.setViewpointCamera(
-            container.lastCameraPosition.toArcGISCamera(viewportSize: size)
+            container.lastCameraPosition.toArcGISCamera(viewportSize: size, fieldOfView: container.verticalFieldOfView)
         )
     }
 
@@ -335,6 +389,14 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         logSceneLoadStatus(container.scene.loadStatus)
         for await status in container.scene.$loadStatus {
             logSceneLoadStatus(status)
+            // The basemap being taken away while it was being fetched (the
+            // app went basemap-less, say for an offline raster) fails the
+            // load; without one the scene needs no network, so it gets one
+            // more go.
+            if status == .failed, container.scene.basemap == nil, !retriedLoad {
+                retriedLoad = true
+                try? await container.scene.retryLoad()
+            }
         }
     }
 
@@ -368,13 +430,38 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         onCameraMove: OnCameraMoveHandler?,
         onCameraMoveEnd: OnCameraMoveHandler?
     ) {
-        // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
-        // from the registry; this provider never learns that clustering exists.
-        state.serviceRegistry.put(MarkerRenderingSupportKey.self, self)
         if didBind {
             NSLog("[MapConductor][ArcGIS] bind skipped because model is already bound")
             return
         }
+        // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
+        // from the registry; this provider never learns that clustering exists.
+        serviceRegistrations.add(state.serviceRegistry.register(MarkerRenderingSupportKey.self, self))
+        // この画面は 3D の SceneView で、**タイル 1 枚 = 256 デバイスピクセル**を
+        // 前提にレベルを選ぶ。ポイントではなくピクセルなのがここの肝で、Retina では
+        // 1 枚が画面で覆うのは 256pt ではなく `256 / scale` pt になる。
+        //
+        // レベルの選択は**宣言したサイズに依存しない**。実測（iPad Pro 11"、
+        // scale=2、統一ズーム 12）では、256 と宣言しても 512 と宣言しても要求は
+        // 同じ z=13 だった。z=13 のタイルが画面で覆うのは 128pt なので、256 と
+        // 宣言すれば文字も線もちょうど半分、512 なら四分の一になる。同じ
+        // 「江戸川区」のインクは 256 で 35x10、128 で 99x23、2D は 104x24。
+        //
+        // ここが 256 だったのは android の計測値をそのまま持ってきたためで、
+        // iOS では測っていなかった。android の SceneView は dp 基準なので
+        // あちらは 256 のままでよい（MapLibre と文字サイズが一致することを実測）。
+        // 2D の `ArcGISMapView2D` は宣言どおり pt で扱うので、何も登録しない。
+        // And no ladder changes it: the view picks its level by the ground a
+        // tile covers and shows every tile across those 256 device pixels
+        // whatever `tileWidth` says (a ladder shifted by two made it pick
+        // level 15 instead of 13 and drew the map at a quarter scale). 512 pt
+        // tiles are not available on this view.
+        let tileDevicePixels = 256.0
+        let displayPoints = Int((tileDevicePixels / max(1.0, UIScreen.main.scale)).rounded())
+        serviceRegistrations.add(state.serviceRegistry.register(
+            RasterTilePreferenceKey.self,
+            FixedRasterTilePreference(preferredTileSize: max(1, displayPoints))
+        ))
         NSLog("[MapConductor][ArcGIS] bind begin")
         didBind = true
 
@@ -397,8 +484,40 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             circleController: ArcGISCircleOverlayController(circleLayer: circleLayer),
             groundImageController: ArcGISGroundImageController(scene: container.scene),
             rasterLayerController: raster,
+            serviceRegistry: state.serviceRegistry
         )
         self.controller = controller
+        // Many polygons are drawn into raster tiles and shown as one tiled layer
+        // (under the graphics overlays); taps still resolve against the original shapes.
+        let polygonTiler = PolygonTiler()
+        polygonTiler.onTemplate = { [weak raster] template, tileSize in
+            if let template {
+                await raster?.upsert(state: PolygonTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await raster?.removeById(PolygonTiler.layerId)
+            }
+        }
+        controller.polygonController.tiler = polygonTiler
+        // Many polylines likewise, in their own raster layer in the polyline band
+        // (under the natively drawn polylines); taps still resolve against the original lines.
+        let polylineTiler = PolylineTiler()
+        polylineTiler.onTemplate = { [weak raster] template, tileSize in
+            if let template {
+                await raster?.upsert(state: PolylineTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await raster?.removeById(PolylineTiler.layerId)
+            }
+        }
+        controller.polylineController.tiler = polylineTiler
+        let circleTiler = CircleTiler()
+        circleTiler.onTemplate = { [weak raster] template, tileSize in
+            if let template {
+                await raster?.upsert(state: CircleTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await raster?.removeById(CircleTiler.layerId)
+            }
+        }
+        controller.circleController.tiler = circleTiler
 
         // クリックカスケードとスロット解決がここから kind で引く。
         // **登録を忘れるとタップに反応しなくなる。**
@@ -407,6 +526,14 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         controller.registerOverlayController(controller.polylineController)
         controller.registerOverlayController(controller.polygonController)
         controller.registerOverlayController(controller.groundImageController)
+        // ラスターレイヤも登録する。タップには関わらないが、**ベクタースタイルを
+        // 描けない backend に渡すラスタータイルの載せ先がここ**で、
+        // `MapViewStyleHost.upsertRaster` はこのレジストリからしか
+        // `RasterLayerMounting` を見つけられない。登録を落としていたため
+        // ArcGIS だけ、スタイルはコンパイルされるのにタイルが 1 枚も出なかった
+        // （診断も出ない: 載せ先が無いことは `MCLog.map` にしか書かれない）。
+        // 他の 11 プロバイダは最初から登録している。
+        controller.registerOverlayController(controller.rasterLayerController)
 
         let overlayScope = MapOverlayScope()
         self.overlayScope = overlayScope
@@ -417,21 +544,34 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         bindOverlayCollector(overlayScope.groundImageCollector, to: controller.groundImageController)
 
         state.setController(controller)
+        if state.mapDesignType.getValue() != createdDesignId { controller.setMapDesignType(state.mapDesignType) }
         // 拡張モジュール（ヒートマップ等）がオーバーレイコントローラを登録できるようにする。
-        state.serviceRegistry.put(OverlayControllerRegistryKey.self, controller.overlayControllers)
+        serviceRegistrations.add(state.serviceRegistry.register(OverlayControllerRegistryKey.self, controller.overlayControllers))
         // android-for-arcgis がコントローラ生成直後に setCameraRestriction するのと同じ位置。
         controller.setCameraRestriction(cameraRestriction)
         state.setSceneViewHolder(controller.typedHolder)
         controller.setMapClickListener(listener: onMapClick)
         controller.setMapLongClickListener(listener: onMapLongClick)
         controller.setCameraMoveStartListener(listener: onCameraMoveStart)
-        controller.setCameraMoveListener(listener: onCameraMove)
-        controller.setCameraMoveEndListener(listener: onCameraMoveEnd)
+        // state のカメラも地図に追従させる（他プロバイダと同じく、移動中・停止時の両方）。
+        // 以前は callback だけに渡していて、`state.cameraPosition` が初期値のまま止まっていた。
+        controller.setCameraMoveListener(listener: { [weak state] position in
+            state?.updateCameraPosition(position)
+            onCameraMove?(position)
+        })
+        controller.setCameraMoveEndListener(listener: { [weak state] position in
+            state?.updateCameraPosition(position)
+            onCameraMoveEnd?(position)
+        })
         controller.setMapDesignTypeChangeListener(listener: { [weak state] value in state?.onMapDesignTypeChange(value: value) })
 
         let markerController = controller.markerController
         markerController.markerTileRasterLayerCallback = { [weak self] state in
-            self?.currentMarkerTileRasterLayer = state
+            guard let self else { return }
+            self.currentMarkerTileRasterLayer = state
+            // マーカーの変化で層だけが作り直されたときは content の同期が来ない。
+            // ここで流さないと、次に画面が描き直されるまで古いタイルのまま残る。
+            self.syncRasterLayers()
         }
 
         infoBubbleCoordinator = InfoBubbleOverlayCoordinator(
@@ -464,9 +604,10 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
     }
 
     func unbind(state: ArcGISMapViewState) {
-        // 登録した capability を取り下げる。レジストリの持ち主は state で、ビューより長生きするため、
-        // ここで外さないと破棄済みのコントローラを掴んだまま残る。
-        state.serviceRegistry.removeProviderRegistrations()
+        // 2D and 3D share a state. A departing view must remove only its
+        // own registrations, preserving any replacement already mounted.
+        styleHost.dispose()
+        serviceRegistrations.disposeAll()
         NSLog("[MapConductor][ArcGIS] unbind begin")
         dragState = .idle
         controller?.markerController.renderer.animationOverlay?.unbind()
@@ -570,27 +711,43 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         dragState = .idle
     }
 
+    func refreshDirectTileLayers() {
+        Task { [weak self] in
+            await self?.controller?.rasterLayerController.refreshDirectLayers()
+        }
+    }
+
     func notifyCameraMove(camera: Camera) {
-        let position = camera.toMapCameraPosition(
+        // `raw.position` は画面中心。外へはターゲット（パディングの残りの中央）と視野角を出す。
+        let raw = camera.toMapCameraPosition(
             logicalTiltHint: controller?.lastLogicalTilt,
             viewportSize: container.viewportSize
         )
+        let position = CameraPaddingEmulation.restored(
+            raw,
+            paddings: container.lastPaddings,
+            fov: container.verticalFieldOfView,
+            viewportSize: container.viewportSize ?? .zero
+        )
         container.lastCameraPosition = position
+        // The in-process tile callback holds back requests for levels the
+        // camera is not looking at; this is how it knows which level that is.
+        controller?.rasterLayerController.renderer.cameraMoved(unifiedZoom: position.zoom)
         controller?.notifyCameraMove(position)
 
         cameraMoveEndWorkItem?.cancel()
         let viewportSize = container.viewportSize
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            let vr = Self.computeVisibleRegion(for: position, viewportSize: viewportSize)
-            let posWithVR = MapCameraPosition(
-                position: position.position,
-                zoom: position.zoom,
-                bearing: position.bearing,
-                tilt: position.tilt,
-                paddings: position.paddings,
-                visibleRegion: vr
-            )
+            // A programmatic move (fly-to, fitBounds) ends no interaction, so
+            // the rebuild that re-requests a level answered transparent has to
+            // come from here.
+            if self.controller?.rasterLayerController.renderer.directLayersNeedRebuild() == true {
+                self.refreshDirectTileLayers()
+            }
+            // 可視領域はカメラの幾何から出すので、画面中心のカメラ（raw）で計算する。
+            let vr = Self.computeVisibleRegion(for: raw, viewportSize: viewportSize)
+            let posWithVR = position.copy(visibleRegion: vr)
             // 範囲・ズーム制限に違反していれば矩形内へ引き戻す（ArcGIS はネイティブの範囲制限
             // API が無いため）。再適用すると viewpointChanged が再発火し、そこでは補正不要に
             // なり通常フローへ進む。android-for-arcgis と同一仕様。
@@ -654,6 +811,17 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
         connectStrategyRendering(nil)
     }
 
+    /// `clearOverlays()` から呼ばれる。strategy は接続したまま、描いたマーカーだけを消す。
+    /// 同じインスタンスの一覧が送られている間は描かず、顔ぶれが変わるか作り直された state が
+    /// 来たら描き直す（StrategyMarkerManager.clearMarkers・オーバーレイのコレクタと同じ）。
+    func clearMarkers() async {
+        strategyClearedUntilListChanges = true
+        await strategyMarkerController?.clear()
+    }
+
+    /// ``clearMarkers()`` の後、一覧が変わるまで描かない印。
+    private var strategyClearedUntilListChanges = false
+
     func beginContentPass() {
         strategyConnectedThisPass = false
     }
@@ -672,6 +840,7 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
                 let renderer = ArcGISMarkerRenderer(markerLayer: markerLayer, container: container)
                 strategyMarkerRenderer = renderer
                 strategyMarkerController = ArcGISStrategyController(strategy: strategy, renderer: renderer)
+                strategyClearedUntilListChanges = false
                 // find() の android 同等 screen 空間判定用に geo→screen 投影を注入する。
                 strategyMarkerController?.markerProjector = { [weak self] geo in
                     guard let proxy = self?.container.proxy?.proxy else { return nil }
@@ -721,6 +890,10 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             newStatesById[state.id] = state
         }
         strategyMarkerStatesById = newStatesById
+        if strategyClearedUntilListChanges {
+            guard shouldSyncList else { return }
+            strategyClearedUntilListChanges = false
+        }
 
         let removedIds = oldIds.subtracting(newIds)
         for id in removedIds {
@@ -750,6 +923,12 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             }
     }
 
+    /// content のラスターレイヤに、タイル方式マーカーの層を合流させて流す。
+    private func syncRasterLayers() {
+        let tileLayer = currentMarkerTileRasterLayer.map { [$0] } ?? []
+        overlayScope?.rasterLayerCollector.sync(contentRasterLayers + tileLayer)
+    }
+
     func updateContent(_ content: MapViewContent) async {
         guard let controller else {
             NSLog("[MapConductor][ArcGIS] updateContent skipped because controller is nil")
@@ -762,12 +941,16 @@ private final class ArcGISMapViewModel: ObservableObject, MarkerRenderingSupport
             await controller.markerController.syncMarkers(content.markers)
         }
         overlayScope?.groundImageCollector.sync(content.groundImages.map { $0.state })
-        let tileLayer = currentMarkerTileRasterLayer.map { RasterLayer(state: $0) }
-        let allRasterLayers = content.rasterLayers + (tileLayer.map { [$0] } ?? [])
-        overlayScope?.rasterLayerCollector.sync(allRasterLayers.map { $0.state })
+        contentRasterLayers = content.rasterLayers.map { $0.state }
+        syncRasterLayers()
         overlayScope?.circleCollector.sync(content.circles.map { $0.state })
         overlayScope?.polylineCollector.sync(content.polylines.map { $0.state })
         overlayScope?.polygonCollector.sync(content.polygons.map { $0.state })
+        controller.polygonController.tiler?.refreshIfServerMoved()
+        if controller.polylineController.tiler?.setOptions(content.polylineTilingOptions) == true { overlayScope?.polylineCollector.flush() }
+        if controller.circleController.tiler?.setOptions(content.circleTilingOptions) == true { overlayScope?.circleCollector.flush() }
+        controller.polylineController.tiler?.refreshIfServerMoved()
+        controller.circleController.tiler?.refreshIfServerMoved()
         for handler in content.polygonSyncHandlers {
             let hullController = hullPolygonController
             handler.bindPolygonSync { [weak hullController] states in

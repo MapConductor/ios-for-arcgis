@@ -26,6 +26,9 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     let groundImageController: ArcGISGroundImageController
     let rasterLayerController: ArcGISRasterLayerController
     private let strategyMarkerControllerProvider: () -> ArcGISStrategyMarkerController?
+    /// `clearOverlays()` で strategy（クラスタリングなど）のマーカーも消すために引く。
+    /// 持ち主は state なので弱参照で持つ。
+    private weak var serviceRegistry: MapServiceRegistry?
 
     private var cameraMoveStartListener: OnCameraMoveHandler?
     private var cameraMoveListener: OnCameraMoveHandler?
@@ -59,7 +62,8 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         circleController: ArcGISCircleOverlayController,
         groundImageController: ArcGISGroundImageController,
         rasterLayerController: ArcGISRasterLayerController,
-        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil }
+        strategyMarkerControllerProvider: @escaping () -> ArcGISStrategyMarkerController? = { nil },
+        serviceRegistry: MapServiceRegistry? = nil
     ) {
         self.typedHolder = holder
         self.holder = AnyMapViewHolder(holder)
@@ -70,6 +74,7 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         self.groundImageController = groundImageController
         self.rasterLayerController = rasterLayerController
         self.strategyMarkerControllerProvider = strategyMarkerControllerProvider
+        self.serviceRegistry = serviceRegistry
     }
 
     func clearOverlays() async {
@@ -79,6 +84,8 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
         await polygonController.clear()
         await circleController.clear()
         await rasterLayerController.clear()
+        // strategy（クラスタリングなど）が描いたマーカーも消す。
+        await serviceRegistry?.clearMarkerRendering()
     }
 
     func setCameraMoveStartListener(listener: OnCameraMoveHandler?) {
@@ -112,20 +119,24 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     func moveCamera(position: MapCameraPosition) {
         lastLogicalTilt = position.tilt
         typedHolder.mapView.lastCameraPosition = position
+        typedHolder.mapView.lastPaddings = position.paddings
         Task {
-            let viewportSize = typedHolder.mapView.viewportSize
-            typedHolder.mapView.proxy?.proxy.setViewpointCamera(position.toArcGISCamera(viewportSize: viewportSize))
+            let container = typedHolder.mapView
+            container.proxy?.proxy.setViewpointCamera(
+                position.toArcGISCamera(viewportSize: container.viewportSize, fieldOfView: container.verticalFieldOfView)
+            )
         }
     }
 
     func animateCamera(position: MapCameraPosition, duration: Long) {
         lastLogicalTilt = position.tilt
         typedHolder.mapView.lastCameraPosition = position
+        typedHolder.mapView.lastPaddings = position.paddings
         Task {
-            let viewportSize = typedHolder.mapView.viewportSize
+            let container = typedHolder.mapView
             cameraMoveStartListener?(position)
-            await typedHolder.mapView.proxy?.proxy.setViewpointCamera(
-                position.toArcGISCamera(viewportSize: viewportSize),
+            await container.proxy?.proxy.setViewpointCamera(
+                position.toArcGISCamera(viewportSize: container.viewportSize, fieldOfView: container.verticalFieldOfView),
                 duration: Double(duration) / 1000
             )
             cameraMoveEndListener?(position)
@@ -188,7 +199,14 @@ final class ArcGISMapViewController: MapViewControllerProtocol {
     }
 
     func setMapDesignType(_ value: ArcGISMapDesignType) {
-        typedHolder.map.basemap = Basemap(style: ArcGISDesign.toBasemapStyle(value))
+        let scene = typedHolder.map
+        scene.basemap = ArcGISDesign.basemap(for: value)
+        // A scene that failed to load -- its basemap was out of reach -- gets
+        // another go with the new basemap, or with none, which needs no
+        // network at all.
+        if case .failed = scene.loadStatus {
+            Task { try? await scene.retryLoad() }
+        }
         mapDesignTypeChangeListener?(value)
     }
 

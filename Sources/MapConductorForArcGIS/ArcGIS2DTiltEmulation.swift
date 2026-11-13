@@ -1,5 +1,5 @@
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 /// ArcGIS の 2D `MapView` 向けの tilt 擬似表現。
 ///
@@ -30,6 +30,9 @@ enum ArcGIS2DTiltEmulation {
     /// `ArcGIS2DTiltModifier`（描画）と `ArcGISMapContainer2D.fromInnerToSurface`
     /// （座標の畳み込み）の両方が参照するのでここに置く。
     static let planeScale: CGFloat = 2.0
+
+    /// tilt は遠近なしで描く（ビューを傾けるだけ）ので、縦の視野角は 0。
+    static let verticalFieldOfView: Double = 0.0
 
     /// 高度の算出にはプラットフォーム非依存の既定値（Google Maps 較正）を使う。
     ///
@@ -69,7 +72,7 @@ enum ArcGIS2DTiltEmulation {
         let target = Spherical.computeOffset(
             origin: position.position,
             distance: distanceForward,
-            heading: position.bearing
+            heading: CameraBearing.toNativeHeading(position.bearing)
         )
         return (target, zoom)
     }
@@ -101,7 +104,7 @@ enum ArcGIS2DTiltEmulation {
         let originalPosition = Spherical.computeOffset(
             origin: center,
             distance: distanceBackward,
-            heading: bearing + 180.0
+            heading: CameraBearing.toNativeHeading(bearing) + 180.0
         )
         return (originalPosition, originalZoom)
     }

@@ -64,18 +64,27 @@ public final class ArcGISMapViewState: MapViewState<ArcGISMapDesignType> {
         return nil
     }
 
+    // A departing 2D/3D view must not detach the other view's replacement.
     func setController(_ controller: ArcGISMapViewController?) {
         sceneController = controller
         // setMapDesignType is intentionally omitted here: the Scene was already created
         // with the correct basemap style in ArcGISMapViewModel.init. Replacing the Basemap
         // while the Scene is loading causes "weak_ptr is expired" in ArcGIS SDK.
-        attachController(controller)
+        if let controller {
+            attachController(controller)
+        } else if attachedMapController is ArcGISMapViewController {
+            detachController()
+        }
     }
 
     func setController(_ controller: ArcGISMapView2DController?) {
         mapController = controller
         // 3D と同じ理由で setMapDesignType は呼ばない（Map は既に正しい basemap で生成済み）。
-        attachController(controller)
+        if let controller {
+            attachController(controller)
+        } else if attachedMapController is ArcGISMapView2DController {
+            detachController()
+        }
     }
 
     func onMapDesignTypeChange(value: ArcGISMapDesignType) {
