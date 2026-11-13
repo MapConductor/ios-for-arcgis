@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name = "MapConductorForArcGIS"
-  s.version = "1.3.1"
+  s.version = "1.4.0"
   s.summary = "MapConductor's ArcGIS provider."
   s.license = { :type => "Apache-2.0", :file => "LICENSE" }
   s.author = "MapConductor"
@@ -10,7 +10,7 @@ Pod::Spec.new do |s|
   s.platform = :ios, "18.0"
   s.swift_version = "5.9"
   s.source_files = "Sources/MapConductorForArcGIS/**/*.swift"
-  s.dependency "MapConductorCore"
+  s.dependency "MapConductorCore", "~> 1.4"
   # ios-sdk/CLAUDE.md's "iOS Provider Distribution" section says a *dynamic* vendor framework
   # should stay a plain `s.dependency "VendorSDK"` resolved from that vendor's own podspec
   # (ArcGIS.xcframework is confirmed dynamic - `file .../ArcGIS` reports "Mach-O 64-bit
